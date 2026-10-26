@@ -21,6 +21,8 @@
 
 /* Zigbee Configuration */
 #define MAX_CHILDREN 10
+#define MAX_ZIGBEE_DEVICES 8
+#define ZIGBEE_DEVICE_ID_LENGTH 32
 #define INSTALLCODE_POLICY_ENABLE false
 #define ESP_ZB_PRIMARY_CHANNEL_MASK (1L << 13)
 #define ESP_ZB_GATEWAY_ENDPOINT 1
@@ -30,16 +32,108 @@
 #define UART_TX_GPIO      4
 #define UART_RX_GPIO      5
 #define UART_BAUD_RATE    115200
+#define UART_PROTOCOL_VERSION 1
 
 static const char *TAG = "ESP_ZB_GATEWAY";
 static const char *TAG_UART = "UART";
 
-static uint16_t light_short_address = 0xb5f5;
-static uint8_t light_endpoint = 0;
-static bool light_endpoint_discovered = false;
-static esp_zb_ieee_addr_t light_ieee_address = {0};
-static const char *const discovered_device_id = "luz_sala";
+typedef struct {
+    bool used;
+    bool online;
+    char id[ZIGBEE_DEVICE_ID_LENGTH];
+    uint16_t short_address;
+    uint8_t endpoint;
+    bool endpoint_discovered;
+    esp_zb_ieee_addr_t ieee_address;
+} zigbee_device_t;
+
+static zigbee_device_t s_devices[MAX_ZIGBEE_DEVICES];
 static SemaphoreHandle_t uart_tx_mutex;
+static uint32_t s_uart_invalid_commands;
+static uint32_t s_uart_tx_errors;
+
+static zigbee_device_t *find_device_by_id(const char *id)
+{
+    for (size_t i = 0; i < MAX_ZIGBEE_DEVICES; ++i) {
+        if (s_devices[i].used && strcmp(s_devices[i].id, id) == 0) {
+            return &s_devices[i];
+        }
+    }
+    return NULL;
+}
+
+static zigbee_device_t *find_device_by_endpoint(uint8_t endpoint)
+{
+    zigbee_device_t *match = NULL;
+    for (size_t i = 0; i < MAX_ZIGBEE_DEVICES; ++i) {
+        if (s_devices[i].used && s_devices[i].endpoint_discovered &&
+            s_devices[i].endpoint == endpoint) {
+            if (match != NULL) {
+                return NULL;
+            }
+            match = &s_devices[i];
+        }
+    }
+    return match;
+}
+
+static zigbee_device_t *find_device_by_ieee(const esp_zb_ieee_addr_t ieee_address)
+{
+    for (size_t i = 0; i < MAX_ZIGBEE_DEVICES; ++i) {
+        if (s_devices[i].used &&
+            memcmp(s_devices[i].ieee_address, ieee_address,
+                   sizeof(esp_zb_ieee_addr_t)) == 0) {
+            return &s_devices[i];
+        }
+    }
+    return NULL;
+}
+
+static zigbee_device_t *allocate_device(const esp_zb_ieee_addr_t ieee_address)
+{
+    for (size_t i = 0; i < MAX_ZIGBEE_DEVICES; ++i) {
+        if (!s_devices[i].used) {
+            s_devices[i].used = true;
+            s_devices[i].online = true;
+            memcpy(s_devices[i].ieee_address, ieee_address,
+                   sizeof(s_devices[i].ieee_address));
+            return &s_devices[i];
+        }
+    }
+    return NULL;
+}
+
+static zigbee_device_t *register_device(uint16_t short_address,
+                                        const esp_zb_ieee_addr_t ieee_address)
+{
+    zigbee_device_t *device = find_device_by_ieee(ieee_address);
+    if (device == NULL) {
+        device = allocate_device(ieee_address);
+    }
+    if (device == NULL) {
+        ESP_LOGW(TAG, "Maximum Zigbee device capacity reached");
+        return NULL;
+    }
+
+    device->short_address = short_address;
+    device->online = true;
+    if (device->id[0] == '\0') {
+        size_t device_index = 0;
+        for (size_t i = 0; i < MAX_ZIGBEE_DEVICES; ++i) {
+            if (&s_devices[i] == device) {
+                device_index = i;
+                break;
+            }
+        }
+        if (device_index == 0) {
+            snprintf(device->id, sizeof(device->id), "luz_sala");
+        } else {
+            snprintf(device->id, sizeof(device->id), "zigbee_%02u",
+                     (unsigned)device_index);
+        }
+    }
+    return device;
+}
 
 static bool uart_send_json(const char *serialized)
 {
@@ -56,6 +150,9 @@ static bool uart_send_json(const char *serialized)
         success = uart_write_bytes(UART_PORT_NUM, "\n", 1) == 1;
     }
     uart_wait_tx_done(UART_PORT_NUM, pdMS_TO_TICKS(1000));
+    if (!success) {
+        s_uart_tx_errors++;
+    }
     xSemaphoreGive(uart_tx_mutex);
     return success;
 }
@@ -64,6 +161,7 @@ static void uart_send_response(int request_id, const char *device, const char *s
 {
     cJSON *response = cJSON_CreateObject();
     cJSON_AddStringToObject(response, "type", "response");
+    cJSON_AddNumberToObject(response, "protocol_version", UART_PROTOCOL_VERSION);
     cJSON_AddNumberToObject(response, "request_id", request_id);
     cJSON_AddStringToObject(response, "device", device);
     cJSON_AddStringToObject(response, "status", status);
@@ -79,22 +177,23 @@ static void uart_send_response(int request_id, const char *device, const char *s
     cJSON_Delete(response);
 }
 
-static void uart_send_device_discovered_event(void)
+static void uart_send_device_discovered_event(const zigbee_device_t *device)
 {
     cJSON *message = cJSON_CreateObject();
     cJSON_AddStringToObject(message, "type", "event");
-    cJSON_AddStringToObject(message, "device", discovered_device_id);
+    cJSON_AddNumberToObject(message, "protocol_version", UART_PROTOCOL_VERSION);
+    cJSON_AddStringToObject(message, "device", device->id);
     cJSON_AddStringToObject(message, "event", "device_discovered");
     cJSON_AddStringToObject(message, "value", "on_off");
-    cJSON_AddNumberToObject(message, "short_address", light_short_address);
-    cJSON_AddNumberToObject(message, "endpoint", light_endpoint);
+    cJSON_AddNumberToObject(message, "short_address", device->short_address);
+    cJSON_AddNumberToObject(message, "endpoint", device->endpoint);
 
     char ieee[24];
     snprintf(ieee, sizeof(ieee), "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
-             light_ieee_address[7], light_ieee_address[6],
-             light_ieee_address[5], light_ieee_address[4],
-             light_ieee_address[3], light_ieee_address[2],
-             light_ieee_address[1], light_ieee_address[0]);
+             device->ieee_address[7], device->ieee_address[6],
+             device->ieee_address[5], device->ieee_address[4],
+             device->ieee_address[3], device->ieee_address[2],
+             device->ieee_address[1], device->ieee_address[0]);
     cJSON_AddStringToObject(message, "ieee_address", ieee);
 
     char *serialized = cJSON_PrintUnformatted(message);
@@ -107,15 +206,16 @@ static void uart_send_device_discovered_event(void)
     cJSON_Delete(message);
 }
 
-static void uart_send_state_event(uint16_t short_address, uint8_t endpoint, bool state)
+static void uart_send_state_event(const zigbee_device_t *device, bool state)
 {
     cJSON *message = cJSON_CreateObject();
     cJSON_AddStringToObject(message, "type", "event");
-    cJSON_AddStringToObject(message, "device", discovered_device_id);
+    cJSON_AddNumberToObject(message, "protocol_version", UART_PROTOCOL_VERSION);
+    cJSON_AddStringToObject(message, "device", device->id);
     cJSON_AddStringToObject(message, "event", "state_changed");
     cJSON_AddBoolToObject(message, "value", state);
-    cJSON_AddNumberToObject(message, "short_address", short_address);
-    cJSON_AddNumberToObject(message, "endpoint", endpoint);
+    cJSON_AddNumberToObject(message, "short_address", device->short_address);
+    cJSON_AddNumberToObject(message, "endpoint", device->endpoint);
 
     char *serialized = cJSON_PrintUnformatted(message);
     if (serialized != NULL) {
@@ -125,6 +225,63 @@ static void uart_send_state_event(uint16_t short_address, uint8_t endpoint, bool
         free(serialized);
     }
     cJSON_Delete(message);
+}
+
+static void uart_send_device_status_event(const zigbee_device_t *device,
+                                          const char *event, bool value)
+{
+    cJSON *message = cJSON_CreateObject();
+    cJSON_AddStringToObject(message, "type", "event");
+    cJSON_AddNumberToObject(message, "protocol_version", UART_PROTOCOL_VERSION);
+    cJSON_AddStringToObject(message, "device", device->id);
+    cJSON_AddStringToObject(message, "event", event);
+    cJSON_AddBoolToObject(message, "value", value);
+    cJSON_AddNumberToObject(message, "short_address", device->short_address);
+
+    char *serialized = cJSON_PrintUnformatted(message);
+    if (serialized != NULL) {
+        uart_send_json(serialized);
+        free(serialized);
+    }
+    cJSON_Delete(message);
+}
+
+static void zigbee_leave_callback(esp_zb_zdp_status_t status, void *user_ctx)
+{
+    zigbee_device_t *device = (zigbee_device_t *)user_ctx;
+    if (device == NULL) {
+        return;
+    }
+    if (status != ESP_ZB_ZDP_STATUS_SUCCESS) {
+        ESP_LOGW(TAG, "Failed to remove device %s: status=%d", device->id, status);
+        return;
+    }
+
+    uart_send_device_status_event(device, "device_removed", false);
+    ESP_LOGI(TAG, "Device %s removed from Zigbee network", device->id);
+    memset(device, 0, sizeof(*device));
+}
+
+static bool zigbee_remove_device(zigbee_device_t *device)
+{
+    if (device == NULL || !device->used) {
+        return false;
+    }
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(1000))) {
+        ESP_LOGE(TAG, "Could not acquire Zigbee lock for device removal");
+        return false;
+    }
+
+    esp_zb_zdo_mgmt_leave_req_param_t request = {
+        .dst_nwk_addr = device->short_address,
+        .remove_children = 0,
+        .rejoin = 0,
+    };
+    memcpy(request.device_address, device->ieee_address,
+           sizeof(request.device_address));
+    esp_zb_zdo_device_leave_req(&request, zigbee_leave_callback, device);
+    esp_zb_lock_release();
+    return true;
 }
 
 static void simple_desc_callback(esp_zb_zdp_status_t status,
@@ -137,7 +294,7 @@ static void simple_desc_callback(esp_zb_zdp_status_t status,
     }
 
     ESP_LOGI(TAG, "Device 0x%04x endpoint %u profile=0x%04x device=0x%04x",
-             light_short_address, simple_desc->endpoint,
+             ((zigbee_device_t *)user_ctx)->short_address, simple_desc->endpoint,
              simple_desc->app_profile_id, simple_desc->app_device_id);
 
     const uint8_t cluster_count = simple_desc->app_input_cluster_count +
@@ -146,17 +303,21 @@ static void simple_desc_callback(esp_zb_zdp_status_t status,
     for (uint8_t i = 0; i < cluster_count; ++i) {
         const uint16_t cluster_id = simple_desc->app_cluster_list[i];
         ESP_LOGI(TAG, "Device 0x%04x endpoint %u cluster[%u]=0x%04x",
-                 light_short_address, simple_desc->endpoint, i, cluster_id);
+                 ((zigbee_device_t *)user_ctx)->short_address,
+                 simple_desc->endpoint, i, cluster_id);
         if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF) {
             has_on_off = true;
         }
     }
 
-    if (has_on_off && !light_endpoint_discovered && simple_desc->endpoint != 0xf2) {
-        light_endpoint = simple_desc->endpoint;
-        light_endpoint_discovered = true;
-        ESP_LOGI(TAG, "On/Off cluster found at endpoint %u", light_endpoint);
-        uart_send_device_discovered_event();
+    zigbee_device_t *device = (zigbee_device_t *)user_ctx;
+    if (has_on_off && device != NULL && !device->endpoint_discovered &&
+        simple_desc->endpoint != 0xf2) {
+        device->endpoint = simple_desc->endpoint;
+        device->endpoint_discovered = true;
+        ESP_LOGI(TAG, "On/Off cluster found for %s at endpoint %u",
+                 device->id, device->endpoint);
+        uart_send_device_discovered_event(device);
     }
 }
 
@@ -168,26 +329,29 @@ static void active_ep_callback(esp_zb_zdp_status_t status, uint8_t ep_count,
         return;
     }
 
-    ESP_LOGI(TAG, "Device 0x%04x has %u active endpoint(s)",
-             light_short_address, ep_count);
+    zigbee_device_t *device = (zigbee_device_t *)user_ctx;
+    if (device == NULL) {
+        return;
+    }
+    ESP_LOGI(TAG, "Device %s (0x%04x) has %u active endpoint(s)",
+             device->id, device->short_address, ep_count);
     for (uint8_t i = 0; i < ep_count; ++i) {
         esp_zb_zdo_simple_desc_req_param_t request = {
-            .addr_of_interest = light_short_address,
+            .addr_of_interest = device->short_address,
             .endpoint = ep_id_list[i],
         };
-        esp_zb_zdo_simple_desc_req(&request, simple_desc_callback, NULL);
+        esp_zb_zdo_simple_desc_req(&request, simple_desc_callback, device);
     }
 }
 
-static void discover_device(uint16_t short_address)
+static void discover_device(zigbee_device_t *device)
 {
-    light_short_address = short_address;
-    light_endpoint = 0;
-    light_endpoint_discovered = false;
+    device->endpoint = 0;
+    device->endpoint_discovered = false;
     esp_zb_zdo_active_ep_req_param_t request = {
-        .addr_of_interest = short_address,
+        .addr_of_interest = device->short_address,
     };
-    esp_zb_zdo_active_ep_req(&request, active_ep_callback, NULL);
+    esp_zb_zdo_active_ep_req(&request, active_ep_callback, device);
 }
 
 static esp_err_t zigbee_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
@@ -200,10 +364,17 @@ static esp_err_t zigbee_action_handler(esp_zb_core_action_callback_id_t callback
             attribute_message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID &&
             attribute_message->attribute.data.value != NULL) {
             const bool state = *(bool *)attribute_message->attribute.data.value;
-            ESP_LOGI(TAG, "Received On/Off state: src=0x%04x endpoint=%u state=%s",
-                     light_short_address, attribute_message->info.dst_endpoint,
+            zigbee_device_t *device = find_device_by_endpoint(
+                attribute_message->info.dst_endpoint);
+            if (device == NULL) {
+                ESP_LOGW(TAG, "Ignoring ambiguous state update: endpoint=%u",
+                         attribute_message->info.dst_endpoint);
+                return ESP_OK;
+            }
+            ESP_LOGI(TAG, "Received On/Off state: device=%s src=0x%04x endpoint=%u state=%s",
+                     device->id, device->short_address, device->endpoint,
                      state ? "on" : "off");
-            uart_send_state_event(light_short_address, attribute_message->info.dst_endpoint, state);
+            uart_send_state_event(device, state);
         }
     } else if (callback_id == ESP_ZB_CORE_CMD_DEFAULT_RESP_CB_ID && message != NULL) {
         const esp_zb_zcl_cmd_info_t *info = (const esp_zb_zcl_cmd_info_t *)message;
@@ -213,7 +384,7 @@ static esp_err_t zigbee_action_handler(esp_zb_core_action_callback_id_t callback
     return ESP_OK;
 }
 
-static bool zigbee_send_on_off(const char *action)
+static bool zigbee_send_on_off(zigbee_device_t *device, const char *action)
 {
     uint8_t command_id;
     if (strcmp(action, "on") == 0) {
@@ -224,8 +395,8 @@ static bool zigbee_send_on_off(const char *action)
         return false;
     }
 
-    if (!light_endpoint_discovered) {
-        ESP_LOGW(TAG, "No On/Off endpoint discovered");
+    if (device == NULL || !device->endpoint_discovered) {
+        ESP_LOGW(TAG, "No On/Off endpoint discovered for requested device");
         return false;
     }
 
@@ -236,8 +407,8 @@ static bool zigbee_send_on_off(const char *action)
 
     esp_zb_zcl_on_off_cmd_t command = {
         .zcl_basic_cmd = {
-            .dst_addr_u.addr_short = light_short_address,
-            .dst_endpoint = light_endpoint,
+            .dst_addr_u.addr_short = device->short_address,
+            .dst_endpoint = device->endpoint,
             .src_endpoint = ESP_ZB_GATEWAY_ENDPOINT,
         },
         .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
@@ -330,9 +501,27 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                  dev_annce_params->ieee_addr[5], dev_annce_params->ieee_addr[4],
                  dev_annce_params->ieee_addr[3], dev_annce_params->ieee_addr[2],
                  dev_annce_params->ieee_addr[1], dev_annce_params->ieee_addr[0]);
-        memcpy(light_ieee_address, dev_annce_params->ieee_addr, sizeof(light_ieee_address));
-        discover_device(dev_annce_params->device_short_addr);
+        zigbee_device_t *device = register_device(
+            dev_annce_params->device_short_addr, dev_annce_params->ieee_addr);
+        if (device != NULL) {
+            uart_send_device_status_event(device, "device_online", true);
+            ESP_LOGI(TAG, "Registered Zigbee device %s", device->id);
+            discover_device(device);
+        }
         break;
+
+    case ESP_ZB_ZDO_SIGNAL_LEAVE_INDICATION: {
+        esp_zb_zdo_signal_leave_indication_params_t *leave =
+            (esp_zb_zdo_signal_leave_indication_params_t *)
+                esp_zb_app_signal_get_params(p_sg_p);
+        zigbee_device_t *device = find_device_by_ieee(leave->device_addr);
+        if (device != NULL) {
+            device->online = false;
+            uart_send_device_status_event(device, "device_offline", false);
+            ESP_LOGW(TAG, "Device %s left the Zigbee network", device->id);
+        }
+        break;
+    }
 
     case ESP_ZB_NWK_SIGNAL_PERMIT_JOIN_STATUS:
         if (err_status == ESP_OK) {
@@ -410,21 +599,59 @@ static void uart_receive_task(void *pvParameters)
 
                     cJSON *root = cJSON_Parse(line);
                     cJSON *type = root != NULL ? cJSON_GetObjectItem(root, "type") : NULL;
+                    cJSON *protocol_version = root != NULL ?
+                                               cJSON_GetObjectItem(root, "protocol_version") : NULL;
                     cJSON *request_id = root != NULL ? cJSON_GetObjectItem(root, "request_id") : NULL;
                     cJSON *device = root != NULL ? cJSON_GetObjectItem(root, "device") : NULL;
                     cJSON *action = root != NULL ? cJSON_GetObjectItem(root, "action") : NULL;
+                    cJSON *duration = root != NULL ? cJSON_GetObjectItem(root, "duration_seconds") : NULL;
 
-                    if (!cJSON_IsObject(root) || !cJSON_IsString(type) ||
+                    if (!cJSON_IsObject(root) || !cJSON_IsNumber(protocol_version) ||
+                        protocol_version->valueint != UART_PROTOCOL_VERSION ||
+                        !cJSON_IsString(type) ||
                         strcmp(type->valuestring, "command") != 0 ||
-                        !cJSON_IsNumber(request_id) || !cJSON_IsString(device) ||
-                        !cJSON_IsString(action)) {
+                        !cJSON_IsNumber(request_id) || request_id->valueint <= 0 ||
+                        !cJSON_IsString(device) || strlen(device->valuestring) == 0 ||
+                        strlen(device->valuestring) >= ZIGBEE_DEVICE_ID_LENGTH ||
+                        !cJSON_IsString(action) || strlen(action->valuestring) == 0 ||
+                        strlen(action->valuestring) >= 24) {
+                        s_uart_invalid_commands++;
                         uart_send_response(cJSON_IsNumber(request_id) ? request_id->valueint : 0,
                                            cJSON_IsString(device) ? device->valuestring : "",
-                                           "error", "invalid_command");
-                    } else if (strcmp(device->valuestring, "luz_sala") != 0) {
+                                           "error", cJSON_IsNumber(protocol_version) &&
+                                           protocol_version->valueint != UART_PROTOCOL_VERSION ?
+                                           "unsupported_protocol_version" : "invalid_command");
+                    } else if (strcmp(action->valuestring, "permit_join") == 0) {
+                        int duration_seconds = cJSON_IsNumber(duration) ?
+                                               duration->valueint : 60;
+                        if (duration_seconds < 1 || duration_seconds > 180) {
+                            uart_send_response(request_id->valueint, device->valuestring,
+                                               "error", "invalid_duration");
+                        } else {
+                            esp_zb_bdb_open_network((uint8_t)duration_seconds);
+                            ESP_LOGI(TAG, "Permit join opened for %d seconds",
+                                     duration_seconds);
+                            uart_send_response(request_id->valueint, device->valuestring,
+                                               "success", NULL);
+                        }
+                    } else if (strcmp(action->valuestring, "remove_device") == 0) {
+                        zigbee_device_t *target = find_device_by_id(device->valuestring);
+                        if (target == NULL) {
+                            uart_send_response(request_id->valueint, device->valuestring,
+                                               "error", "device_not_found");
+                        } else if (!zigbee_remove_device(target)) {
+                            uart_send_response(request_id->valueint, device->valuestring,
+                                               "error", "remove_failed");
+                        } else {
+                            uart_send_response(request_id->valueint, device->valuestring,
+                                               "success", NULL);
+                        }
+                    } else if (find_device_by_id(device->valuestring) == NULL) {
                         uart_send_response(request_id->valueint, device->valuestring,
                                            "error", "device_not_found");
-                    } else if (!zigbee_send_on_off(action->valuestring)) {
+                    } else if (!zigbee_send_on_off(
+                                   find_device_by_id(device->valuestring),
+                                   action->valuestring)) {
                         uart_send_response(request_id->valueint, device->valuestring,
                                            "error", "unsupported_action");
                     } else {

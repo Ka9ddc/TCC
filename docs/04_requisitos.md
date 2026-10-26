@@ -43,10 +43,20 @@
 - POST /api/devices/{id}/command: enviar comando
 - Respostas em formato JSON
 - Content-Type: application/json
+- Comandos manuais devem retornar o resultado confirmado pelo C6, ou indicar
+  erro/timeout
 
 **Prioridade:** Alta
 
-**Status:** ✅ Implementado (parcialmente)
+**Status:** ⏳ Em desenvolvimento
+
+As rotas de controle e configuração exigem autenticação Bearer. As rotas de
+consulta de dispositivos e status permanecem públicas para descoberta local.
+O token pode ser alterado pela rota autenticada `POST /api/config/auth` e é
+persistido em NVS.
+As credenciais STA/AP também podem ser atualizadas por
+`POST /api/config/wifi`, com aplicação após reinicialização.
+`GET /api/config` fornece SSIDs e estado da conectividade sem expor senhas.
 
 ---
 
@@ -64,6 +74,10 @@
 
 **Status:** ✅ Implementado
 
+O protocolo UART utiliza versão 1, códigos de erro padronizados, validação de
+mensagens e contadores de mensagens inválidas, respostas desconhecidas e
+respostas duplicadas no status do S3.
+
 ---
 
 ### RF05 - Controlar Dispositivos Zigbee
@@ -75,10 +89,22 @@
 - Comissionar dispositivos
 - Enviar comandos On/Off
 - Canal 13 (2.410 GHz)
+- Manter múltiplos dispositivos Zigbee na tabela do coordinator
 
 **Prioridade:** Alta
 
 **Status:** ✅ Implementado (parcialmente)
+
+O pareamento pode ser aberto explicitamente pela rota
+`POST /api/zigbee/permit-join`, com duração configurável entre 1 e 180
+segundos.
+
+Dispositivos podem ser removidos pela rota `DELETE /api/devices/{id}`. Eventos
+de entrada, saída e remoção atualizam o status do dispositivo no S3.
+
+O S3 mantém até oito dispositivos Zigbee registrados. A detecção confiável de
+offline por ausência de resposta permanece como dívida técnica; atualmente o
+status depende de eventos explícitos do C6.
 
 ---
 
@@ -94,7 +120,7 @@
 
 **Prioridade:** Média
 
-**Status:** ⏳ Em desenvolvimento
+**Status:** ✅ Implementado (parcialmente)
 
 ---
 
@@ -110,7 +136,10 @@
 
 **Prioridade:** Média
 
-**Status:** ⏳ Em desenvolvimento
+**Status:** ✅ Implementado (parcialmente)
+
+O registro de dispositivos Zigbee foi generalizado para até oito dispositivos,
+com migração automática do formato anterior de dispositivo único.
 
 ---
 
@@ -119,14 +148,18 @@
 **Descrição:** O sistema deve notificar eventos de dispositivos (ex.: sensor de presença).
 
 **Critérios de Aceite:**
-- Enviar evento C6 → S3 via UART
+- Enviar evento C6 → S3 via UART ou dispositivo Wi-Fi → S3 via HTTP
 - Formato JSON
-- Incluir device, event, value
+- Incluir device, event, value booleano ou numérico
 - Processar no Rule Engine
 
 **Prioridade:** Média
 
 **Status:** ⏳ Em desenvolvimento
+
+O S3 também cadastra sensores Wi-Fi após o primeiro evento, aplica filtragem
+de pequenas variações, mantém o último valor em NVS e marca o dispositivo
+como offline após 30 segundos sem comunicação.
 
 ---
 
@@ -273,7 +306,7 @@
 | RF05 | Zigbee | esp_zigbee_gateway.c | ✅ |
 | RF06 | Regras | (em desenvolvimento) | ⏳ |
 | RF07 | NVS | softap_sta.c | ⏳ |
-| RF08 | Eventos | (em desenvolvimento) | ⏳ |
+| RF08 | Eventos Zigbee e Wi-Fi | softap_sta.c | ✅ (parcialmente) |
 
 ---
 
