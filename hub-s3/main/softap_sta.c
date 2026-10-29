@@ -219,6 +219,44 @@ static bool api_request_is_authenticated(httpd_req_t *req)
     return true;
 }
 
+static esp_err_t api_root_get_handler(httpd_req_t *req)
+{
+    static const char *html_page =
+        "<!doctype html><html lang=\"pt-BR\"><head>"
+        "<meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>MeuHub IoT</title>"
+        "<style>"
+        "body{font-family:Arial,Helvetica,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:32px}"
+        "main{max-width:960px;margin:0 auto}"
+        ".card{background:#111827;border:1px solid #334155;border-radius:12px;padding:20px;margin-bottom:18px;box-shadow:0 8px 18px rgba(15,23,42,.25)}"
+        "h1{margin-top:0}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}"
+        ".stat{background:#0b1120;border:1px solid #334155;border-radius:10px;padding:16px}"
+        ".label{font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em}"
+        ".value{font-size:28px;margin-top:8px;font-weight:700}"
+        "ul{margin:0;padding-left:20px}"
+        "li{margin-bottom:8px}"
+        "code{background:#020817;padding:4px 8px;border-radius:6px}"
+        "</style></head><body><main>"
+        "<div class=\"card\"><h1>MeuHub IoT</h1><p>Hub local de automação residencial em operação.</p>"
+        "<div class=\"grid\"><div class=\"stat\"><div class=\"label\">Status</div><div class=\"value\" id=\"hub_status\">carregando...</div></div>"
+        "<div class=\"stat\"><div class=\"label\">Dispositivos</div><div class=\"value\" id=\"device_count\">0</div></div>"
+        "<div class=\"stat\"><div class=\"label\">Regras</div><div class=\"value\" id=\"rule_count\">0</div></div>"
+        "</div></div>"
+        "<div class=\"card\"><h2>Rede local</h2><ul><li>Hostname do hub: <code>hub-s3-local</code></li><li>Endpoint da API: <code>http://IP_DO_HUB</code></li><li>Configuração atual: Wi-Fi AP + STA em operação.</li></ul></div>"
+        "<div class=\"card\"><h2>Dispositivos cadastrados</h2><ul id=\"device_list\"><li>Carregando...</li></ul></div>"
+        "</main><script>"
+        "async function loadJSON(url){const res=await fetch(url); if(!res.ok) throw new Error(url+' -> '+res.status); return res.json();}"
+        "async function refresh(){try{const status = await loadJSON('/api/status'); const devices = await loadJSON('/api/devices'); document.getElementById('hub_status').textContent = status.status || 'ok'; document.getElementById('device_count').textContent = Array.isArray(devices) ? devices.length : 0; document.getElementById('rule_count').textContent = status.configured_rules || 0; const deviceList = document.getElementById('device_list'); if(!Array.isArray(devices) || devices.length===0){ deviceList.innerHTML = '<li>Nenhum dispositivo encontrado.</li>'; return; } deviceList.innerHTML = devices.map(d => '<li><strong>'+ (d.id || 'device') + '</strong> (' + (d.protocol || 'unknown') + ') - ' + (d.online ? 'online' : 'offline') + (d.state!==undefined ? ' | state=' + d.state : '') + '</li>').join(''); }catch(err){document.getElementById('hub_status').textContent = 'erro'; document.getElementById('device_list').innerHTML = '<li>Falha ao carregar dados do hub.</li>'; console.error(err);}}"
+        "refresh(); setInterval(refresh, 5000);"
+        "</script></body></html>";
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_sendstr(req, (char *)html_page);
+    return ESP_OK;
+}
+
 typedef enum {
     EVENT_VALUE_BOOL,
     EVENT_VALUE_NUMBER
@@ -1028,7 +1066,7 @@ static esp_netif_t *wifi_init_softap(void)
     }
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_ap_config));
-    ESP_LOGI(TAG_AP, "wifi_init_softap finished. SSID:%s password:%s channel:%d",
+    ESP_LOGI(TAG_AP, "wifi_init_softap finished. SSID:%s channel:%d",
              s_ap_ssid, EXAMPLE_ESP_WIFI_CHANNEL);
 
     return esp_netif_ap;
@@ -2259,6 +2297,13 @@ void app_main(void)
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &config));
 
+    httpd_uri_t uri_root_get = {
+        .uri = "/",
+        .method = HTTP_GET,
+        .handler = api_root_get_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t uri_devices_get = {
         .uri = "/api/devices",
         .method = HTTP_GET,
@@ -2364,6 +2409,7 @@ void app_main(void)
         .user_ctx = NULL
     };
 
+    httpd_register_uri_handler(server, &uri_root_get);
     httpd_register_uri_handler(server, &uri_devices_get);
     httpd_register_uri_handler(server, &uri_device_command_post);
     httpd_register_uri_handler(server, &uri_permit_join_post);

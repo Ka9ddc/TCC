@@ -93,7 +93,21 @@ respostas duplicadas no status do S3.
 
 **Prioridade:** Alta
 
-**Status:** ✅ Implementado (parcialmente)
+**Status:** ✅ Implementado (regras simples e compostas)
+
+O motor suporta até quatro condições por regra com lógica `and`/`or`, estados
+recentes por dispositivo/evento, múltiplas ações, atrasos e durações. Timers
+anteriores do mesmo dispositivo são invalidados quando uma nova ação imediata
+é processada, evitando ações inversas obsoletas.
+
+As regras também podem usar janelas de horário local com `start_time` e
+`end_time` no formato `HH:MM`, inclusive para intervalos que atravessam
+meia-noite. O disparo é bloqueado quando o relógio do S3 ainda não está
+sincronizado.
+
+O S3 sincroniza o horário via SNTP após obter IP na rede STA e expõe o estado
+da sincronização no diagnóstico. O token pode ser restaurado localmente pelo
+GPIO0 durante o boot, sem criar um bypass HTTP não autenticado.
 
 O pareamento pode ser aberto explicitamente pela rota
 `POST /api/zigbee/permit-join`, com duração configurável entre 1 e 180
@@ -121,6 +135,20 @@ status depende de eventos explícitos do C6.
 **Prioridade:** Média
 
 **Status:** ✅ Implementado (parcialmente)
+
+---
+
+### Dívida técnica: stack overflow em reboot com histórico em NVS
+
+**Descrição:** O sistema apresentou reinicialização em loop após persistência de histórico
+com reinicialização do S3. O problema foi observado no fluxo de gravação/carregamento
+em NVS e não foi resolvido na etapa atual para não comprometer a demo estável do MVP.
+
+**Impacto:** risco de crash do firmware após reboot e perda de estado operacional.
+
+**Efeito observado:** loop de boot com `***ERROR*** A stack overflow in task main has been detected.`
+
+**Status:** ⚠️ Aguardando reestudo em trabalho futuro, fora do escopo do MVP atual.
 
 ---
 
@@ -304,7 +332,7 @@ como offline após 30 segundos sem comunicação.
 | RF03 | API HTTP | softap_sta.c | ✅ |
 | RF04 | UART | softap_sta.c, esp_zigbee_gateway.c | ✅ |
 | RF05 | Zigbee | esp_zigbee_gateway.c | ✅ |
-| RF06 | Regras | (em desenvolvimento) | ⏳ |
+| RF06 | Regras | softap_sta.c | ✅ (simples, compostas e temporizadas) |
 | RF07 | NVS | softap_sta.c | ⏳ |
 | RF08 | Eventos Zigbee e Wi-Fi | softap_sta.c | ✅ (parcialmente) |
 

@@ -422,6 +422,72 @@ o histórico e a criação de timers de duração são executados pela tarefa do
 motor de automação, evitando sobrecarregar a tarefa interna `Tmr Svc` do
 FreeRTOS.
 
+Uma nova ação imediata para um dispositivo invalida timers anteriores desse
+mesmo dispositivo. Isso evita que uma ação inversa antiga desligue o dispositivo
+depois de uma nova ativação (por exemplo, duas ativações consecutivas com
+`duration_seconds`). O S3 mantém uma quantidade limitada de timers ativos e
+descarta com erro explícito novas temporizações quando esse limite é atingido.
+
+Regras também podem combinar até quatro condições usando `and` ou `or`:
+
+```json
+{
+  "logic": "and",
+  "conditions": [
+    {
+      "device": "sensor_luminosidade",
+      "event": "illuminance_changed",
+      "value": 100,
+      "operator": "less_than"
+    },
+    {
+      "device": "sensor_presenca",
+      "event": "occupancy_changed",
+      "value": true,
+      "operator": "equals"
+    }
+  ],
+  "actions": [
+    {
+      "device": "luz_sala",
+      "action": "on"
+    }
+  ]
+}
+```
+
+O S3 mantém o último valor recebido para cada par dispositivo/evento e avalia
+as condições compostas com esses estados. A regra dispara somente quando o
+resultado lógico passa de falso para verdadeiro; quando volta a falso, fica
+armada para uma nova execução. O formato legado com uma única condição continua
+aceito.
+
+Uma regra pode restringir a execução a uma janela de horário local usando
+`start_time` e `end_time` no formato `HH:MM`:
+
+```json
+{
+  "trigger_device": "sensor_luminosidade",
+  "trigger_event": "illuminance_changed",
+  "trigger_value": 100,
+  "operator": "less_than",
+  "start_time": "08:00",
+  "end_time": "18:00",
+  "actions": [
+    {
+      "device": "luz_sala",
+      "action": "on"
+    }
+  ]
+}
+```
+
+Os limites são inclusivos. Se `start_time` for posterior a `end_time`, a
+janela atravessa a meia-noite; por exemplo, `22:00`–`06:00`. A avaliação usa o
+relógio local do S3. Até que o relógio seja sincronizado ou configurado, regras
+com janela permanecem bloqueadas; a sincronização de horário (SNTP/RTC) é uma
+evolução futura.
+
 ### 2.6 Correlação de comandos
 
 Todo comando enviado ao C6 recebe um `request_id`. O S3 mantém os comandos
@@ -743,6 +809,31 @@ Conecta à rede Wi-Fi doméstica.
 - Timeout: 5 segundos
 - Máx. tentativas: 5
 
+#### 5.3 Sincronização de horário
+
+Quando o STA obtém um endereço IP, o S3 inicia sincronização SNTP com
+`pool.ntp.org`. O timezone padrão é `BRT3` (UTC-3), correspondente ao horário
+local do projeto. O endpoint autenticado `GET /api/config` informa
+`time_synced`, `timezone` e `local_time` quando o relógio já foi sincronizado.
+
+Regras com janela de horário permanecem bloqueadas até a sincronização do
+relógio. A sincronização depende de conectividade do STA; o AP local continua
+
+### Dívida técnica: stack overflow em reboot com histórico em NVS
+
+Durante a persistência do histórico em NVS, foi identificado um risco de corrupção
+de memória que levou a reinicialização em loop do S3 após reboot. O problema foi
+observado em cenários de persistência e carga do histórico e, por prudência, a
+funcionalidade foi revertida para manter o sistema estável para a etapa atual.
+
+**Impacto:** risco de crash do firmware após reinicialização e comportamento
+instável em operação contínua.
+
+**Status:** dívida técnica registrada; reestudo e correção planejados após a entrega
+do MVP funcional com interface mínima e descoberta mDNS.
+
+funcionando sem Internet.
+
 ---
 
 ## 6. NVS (Non-Volatile Storage)
@@ -757,6 +848,26 @@ Armazenamento persistente de configurações.
 - Dispositivos cadastrados
 - Regras de automação
 - Estado do sistema
+
+### Recuperação do token
+
+Para evitar uma rota HTTP de recuperação sem autenticação, o token possui um
+procedimento físico de restauração. Ligue o S3 normalmente, sem pressionar o
+botão BOOT, e pressione-o durante os primeiros três segundos da aplicação.
+O firmware detecta o GPIO0 em nível baixo, remove o token persistido e restaura.
+Não mantenha GPIO0 pressionado durante o reset, pois isso pode selecionar o
+bootloader do ESP32-S3 em algumas placas.
+
+O token restaurado é:
+
+```text
+TCC-Hub-2026-Local
+```
+
+Após o boot, solte o botão e use o token padrão para configurar um novo token
+em `POST /api/config/auth`. O endpoint `GET /api/config` informa
+`token_recovered: true` somente no boot em que a recuperação ocorreu; nunca
+retorna o token.
 
 ### Exemplo de Uso
 
