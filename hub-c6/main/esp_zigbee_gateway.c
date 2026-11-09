@@ -18,6 +18,8 @@
 #include "zdo/esp_zigbee_zdo_command.h"
 #include "driver/uart.h"
 #include "cJSON.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 /* Zigbee Configuration */
 #define MAX_CHILDREN 10
@@ -51,6 +53,85 @@ static zigbee_device_t s_devices[MAX_ZIGBEE_DEVICES];
 static SemaphoreHandle_t uart_tx_mutex;
 static uint32_t s_uart_invalid_commands;
 static uint32_t s_uart_tx_errors;
+
+static void device_registry_load(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open("devices", NVS_READONLY, &handle) != ESP_OK) {
+        return;
+    }
+
+    for (size_t i = 0; i < MAX_ZIGBEE_DEVICES; ++i) {
+        char key[16];
+        uint8_t used = 0;
+        snprintf(key, sizeof(key), "d%u_used", (unsigned)i);
+        if (nvs_get_u8(handle, key, &used) != ESP_OK || !used) {
+            continue;
+        }
+
+        zigbee_device_t *device = &s_devices[i];
+        memset(device, 0, sizeof(*device));
+        device->used = true;
+        device->online = false;
+        snprintf(key, sizeof(key), "d%u_id", (unsigned)i);
+        size_t id_size = sizeof(device->id);
+        if (nvs_get_str(handle, key, device->id, &id_size) != ESP_OK) {
+            memset(device, 0, sizeof(*device));
+            continue;
+        }
+        snprintf(key, sizeof(key), "d%u_short", (unsigned)i);
+        nvs_get_u16(handle, key, &device->short_address);
+        snprintf(key, sizeof(key), "d%u_ep", (unsigned)i);
+        nvs_get_u8(handle, key, &device->endpoint);
+        snprintf(key, sizeof(key), "d%u_endpoint", (unsigned)i);
+        uint8_t endpoint_discovered = 0;
+        nvs_get_u8(handle, key, &endpoint_discovered);
+        device->endpoint_discovered = endpoint_discovered != 0;
+        snprintf(key, sizeof(key), "d%u_ieee", (unsigned)i);
+        size_t ieee_size = sizeof(device->ieee_address);
+        nvs_get_blob(handle, key, device->ieee_address, &ieee_size);
+    }
+
+    nvs_close(handle);
+}
+
+static void device_registry_save(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open("devices", NVS_READWRITE, &handle) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open device registry NVS");
+        return;
+    }
+
+    esp_err_t err = ESP_OK;
+    for (size_t i = 0; i < MAX_ZIGBEE_DEVICES && err == ESP_OK; ++i) {
+        char key[16];
+        const zigbee_device_t *device = &s_devices[i];
+        snprintf(key, sizeof(key), "d%u_used", (unsigned)i);
+        err = nvs_set_u8(handle, key, device->used ? 1 : 0);
+        if (!device->used) {
+            continue;
+        }
+        snprintf(key, sizeof(key), "d%u_id", (unsigned)i);
+        if (err == ESP_OK) err = nvs_set_str(handle, key, device->id);
+        snprintf(key, sizeof(key), "d%u_short", (unsigned)i);
+        if (err == ESP_OK) err = nvs_set_u16(handle, key, device->short_address);
+        snprintf(key, sizeof(key), "d%u_ep", (unsigned)i);
+        if (err == ESP_OK) err = nvs_set_u8(handle, key, device->endpoint);
+        snprintf(key, sizeof(key), "d%u_endpoint", (unsigned)i);
+        if (err == ESP_OK) err = nvs_set_u8(handle, key, device->endpoint_discovered ? 1 : 0);
+        snprintf(key, sizeof(key), "d%u_ieee", (unsigned)i);
+        if (err == ESP_OK) err = nvs_set_blob(handle, key, device->ieee_address,
+                                               sizeof(device->ieee_address));
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save device registry: %s", esp_err_to_name(err));
+    }
+}
 
 static zigbee_device_t *find_device_by_id(const char *id)
 {
@@ -260,6 +341,7 @@ static void zigbee_leave_callback(esp_zb_zdp_status_t status, void *user_ctx)
     uart_send_device_status_event(device, "device_removed", false);
     ESP_LOGI(TAG, "Device %s removed from Zigbee network", device->id);
     memset(device, 0, sizeof(*device));
+    device_registry_save();
 }
 
 static bool zigbee_remove_device(zigbee_device_t *device)
@@ -317,6 +399,7 @@ static void simple_desc_callback(esp_zb_zdp_status_t status,
         device->endpoint_discovered = true;
         ESP_LOGI(TAG, "On/Off cluster found for %s at endpoint %u",
                  device->id, device->endpoint);
+        device_registry_save();
         uart_send_device_discovered_event(device);
     }
 }
@@ -517,6 +600,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         zigbee_device_t *device = find_device_by_ieee(leave->device_addr);
         if (device != NULL) {
             device->online = false;
+            device_registry_save();
             uart_send_device_status_event(device, "device_offline", false);
             ESP_LOGW(TAG, "Device %s left the Zigbee network", device->id);
         }
@@ -682,6 +766,7 @@ void app_main(void)
     };
 
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
+    device_registry_load();
 
     /* Initialize UART */
     const uart_config_t uart_config = {

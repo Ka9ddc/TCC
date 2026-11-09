@@ -32,6 +32,11 @@ export interface HubStatus {
   uart_unknown_responses: number;
   uart_duplicate_responses: number;
   command_timeouts: number;
+  command_latency_samples?: number;
+  command_latency_last_ms?: number;
+  command_latency_min_ms?: number;
+  command_latency_max_ms?: number;
+  command_latency_avg_ms?: number;
   pending_commands: number;
   history_entries: number;
   configured_rules: number;

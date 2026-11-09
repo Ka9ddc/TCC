@@ -98,6 +98,23 @@ Resposta:
 
 A resposta não inclui senhas, token ou outros segredos.
 
+O endpoint `GET /api/status` também expõe as métricas de latência dos comandos
+que receberam resposta do C6:
+
+```json
+{
+  "command_latency_samples": 12,
+  "command_latency_last_ms": 184,
+  "command_latency_min_ms": 142,
+  "command_latency_max_ms": 311,
+  "command_latency_avg_ms": 201.5
+}
+```
+
+O tempo é medido no S3 desde o envio do comando pela UART até a resposta
+correspondente do C6. Timeouts continuam contabilizados separadamente em
+`command_timeouts`.
+
 Para trocar o token, envie o novo valor autenticado:
 
 ```http
@@ -839,6 +856,13 @@ Armazenamento persistente de configurações.
 - Dispositivos cadastrados
 - Regras de automação
 - Estado do sistema
+
+O registro de dispositivos Zigbee é persistido nos dois controladores. O S3
+guarda o cadastro exposto pela API, incluindo ID, endereço curto, endpoint,
+IEEE e último estado conhecido. O C6 guarda a tabela necessária para
+reconhecer os dispositivos após reinicialização e atualiza os endereços quando
+eles anunciam novamente na rede Zigbee. Um dispositivo carregado do NVS começa
+como offline até que o C6 confirme sua presença.
 
 ### Recuperação do token
 

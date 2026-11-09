@@ -140,6 +140,11 @@ static uint32_t s_uart_error_count;
 static uint32_t s_uart_invalid_message_count;
 static uint32_t s_uart_unknown_response_count;
 static uint32_t s_uart_duplicate_response_count;
+static uint32_t s_command_latency_count;
+static uint64_t s_command_latency_total_us;
+static uint32_t s_command_latency_min_us;
+static uint32_t s_command_latency_max_us;
+static uint32_t s_last_command_latency_us;
 static int64_t s_last_event_us;
 static bool s_rule_execution_active;
 
@@ -670,8 +675,22 @@ static bool pending_command_finish(int request_id, command_result_t result,
             s_pending_commands[i].active = false;
             command_waiter_t *waiter = s_pending_commands[i].waiter;
             s_pending_commands[i].waiter = NULL;
+            uint64_t latency_us = (uint64_t)(esp_timer_get_time() -
+                                             s_pending_commands[i].sent_at_us);
+            uint32_t latency_ms = (uint32_t)(latency_us / 1000U);
+            s_command_latency_count++;
+            s_command_latency_total_us += latency_us;
+            s_last_command_latency_us = latency_ms;
+            if (s_command_latency_min_us == 0 || latency_ms < s_command_latency_min_us) {
+                s_command_latency_min_us = latency_ms;
+            }
+            if (latency_ms > s_command_latency_max_us) {
+                s_command_latency_max_us = latency_ms;
+            }
             ESP_LOGI(TAG_HTTP, "Comando %d concluido com status=%s",
                      request_id, status);
+            ESP_LOGI(TAG_HTTP, "Latencia do comando %d: %lu ms",
+                     request_id, (unsigned long)latency_ms);
             if (waiter != NULL) {
                 waiter->result = result;
                 xSemaphoreGive(waiter->semaphore);
@@ -1982,6 +2001,17 @@ static esp_err_t api_status_get_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(status, "uart_duplicate_responses",
                             s_uart_duplicate_response_count);
     cJSON_AddNumberToObject(status, "command_timeouts", s_command_timeout_count);
+    cJSON_AddNumberToObject(status, "command_latency_samples", s_command_latency_count);
+    cJSON_AddNumberToObject(status, "command_latency_last_ms", s_last_command_latency_us);
+    cJSON_AddNumberToObject(status, "command_latency_min_ms", s_command_latency_min_us);
+    cJSON_AddNumberToObject(status, "command_latency_max_ms", s_command_latency_max_us);
+    cJSON_AddNumberToObject(
+        status,
+        "command_latency_avg_ms",
+        s_command_latency_count == 0
+            ? 0
+            : (double)s_command_latency_total_us /
+                  ((double)s_command_latency_count * 1000.0));
     size_t pending_commands = 0;
     if (s_command_mutex != NULL &&
         xSemaphoreTake(s_command_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
