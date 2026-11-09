@@ -92,7 +92,7 @@ O sistema é composto por uma arquitetura distribuída com dois microcontrolador
 |--------|-----------|
 | **Zigbee Coordinator** | Gerencia rede Zigbee |
 | **UART Protocol** | Recebe comandos e envia eventos para S3 |
-| **Device Registry** | Mapeia IDs lógicos para endereços Zigbee (em desenvolvimento) |
+| **Device Registry** | Mapeia IDs lógicos para endereços Zigbee e persiste o cadastro |
 
 **Responsabilidades:**
 - Formação e manutenção da rede Zigbee
@@ -256,8 +256,13 @@ hub_c6/
 
 ## Trabalhos Futuros
 
-- [ ] Adicionar suporte a Matter
+- [ ] Adicionar suporte a Matter/Thread
 - [ ] Implementar OTA (Over-The-Air updates)
-- [ ] Adicionar mais protocolos (BLE, Wi-Fi direct)
+- [ ] Adicionar outros protocolos abertos
 - [ ] Criar aplicativo móvel
 - [ ] Implementar segurança (TLS, autenticação)
+
+O suporte ao protocolo proprietário Tuya/Elgin foi deliberadamente excluído do
+MVP. A análise da lâmpada Elgin 48BLEDWIFI00 identificou BLE proprietário e
+credenciais específicas do ecossistema Tuya, sem contrato aberto suficiente
+para uma integração local reproduzível no escopo deste trabalho.

@@ -396,6 +396,59 @@ sincronização SNTP; sem relógio válido, a condição não dispara.
 
 ---
 
+## 12. Delimitação dos protocolos de dispositivos
+
+### Decisão
+
+O MVP será demonstrado com Zigbee e Wi-Fi local utilizando contratos abertos
+definidos pelo projeto. A lâmpada Elgin `48BLEDWIFI00` não fará parte da
+integração funcional do MVP.
+
+### Tuya/Elgin
+
+A lâmpada foi identificada como um dispositivo Tuya BLE. Ela anuncia o serviço
+proprietário `FD50`, com características de escrita, notificação e leitura.
+Os quadros observados são binários e aparentam utilizar uma sessão
+autenticada/criptografada. O controle LAN também depende de credenciais
+específicas, como `device_id` e `local_key`, normalmente gerenciadas pelo
+ecossistema Tuya.
+
+### Justificativa
+
+- O protocolo de provisionamento e controle não é aberto nem documentado de
+  forma suficiente para uma implementação confiável no prazo do projeto.
+- Reproduzir credenciais proprietárias desviaria o foco do hub local e do
+  motor de automação.
+- A dependência de conta, serviço ou credencial Tuya contrariaria a decisão de
+  operação local sem nuvem.
+
+Essa delimitação se aplica especificamente ao protocolo proprietário da
+lâmpada Elgin/Tuya. O S3 continua oferecendo Wi-Fi AP/STA, API HTTP local e
+cadastro de dispositivos Wi-Fi compatíveis com o contrato de eventos do
+projeto.
+
+---
+
+## 13. Matter como viabilidade futura
+
+### Decisão
+
+Matter não será implementado no MVP, mas permanece como evolução tecnicamente
+viável.
+
+### Justificativa
+
+O ESP32-C6 possui rádio 802.15.4 compatível com a base necessária para
+ecossistemas Matter sobre Thread, e o projeto já separa o transporte do motor
+de automação por meio do S3. Entretanto, Matter exige camadas adicionais de
+comissionamento, segurança, modelos de dados e integração de software.
+
+A arquitetura atual permite uma futura bridge Matter/Thread no C6 ou um novo
+controlador de protocolo, mantendo o motor de regras e a API do S3. A decisão
+preserva essa possibilidade sem aumentar o risco da entrega atual.
+
+---
+
 ## Lições Aprendidas
 
 1. **Comece simples**: UART + JSON foi mais fácil que esperado

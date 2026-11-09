@@ -48,7 +48,7 @@
 
 **Prioridade:** Alta
 
-**Status:** ⏳ Em desenvolvimento
+**Status:** ✅ Implementado
 
 As rotas de controle e configuração exigem autenticação Bearer. As rotas de
 consulta de dispositivos e status permanecem públicas para descoberta local.
@@ -136,7 +136,7 @@ status depende de eventos explícitos do C6.
 
 **Prioridade:** Média
 
-**Status:** ✅ Implementado (parcialmente)
+**Status:** ✅ Implementado
 
 ---
 
@@ -169,7 +169,9 @@ em NVS e não foi resolvido na etapa atual para não comprometer a demo estável
 **Status:** ✅ Implementado (parcialmente)
 
 O registro de dispositivos Zigbee foi generalizado para até oito dispositivos,
-com migração automática do formato anterior de dispositivo único.
+com migração automática do formato anterior de dispositivo único. O cadastro é
+persistido no S3 e no C6; dispositivos carregados após reinicialização começam
+offline até o C6 confirmar sua presença.
 
 ---
 
@@ -185,7 +187,7 @@ com migração automática do formato anterior de dispositivo único.
 
 **Prioridade:** Média
 
-**Status:** ⏳ Em desenvolvimento
+**Status:** ✅ Implementado
 
 O S3 também cadastra sensores Wi-Fi após o primeiro evento, aplica filtragem
 de pequenas variações, mantém o último valor em NVS e marca o dispositivo
@@ -319,8 +321,9 @@ como offline após 30 segundos sem comunicação.
 ### Restrições de Escopo
 
 - Apenas dispositivos Zigbee On/Off
-- Sem suporte a Matter inicialmente
-- Sem aplicativo móvel
+- Wi-Fi local por API HTTP e eventos de dispositivos compatíveis
+- Sem suporte a Matter no MVP
+- Sem integração com protocolos proprietários Tuya/Elgin
 - Sem nuvem
 
 ---
@@ -335,7 +338,7 @@ como offline após 30 segundos sem comunicação.
 | RF04 | UART | softap_sta.c, esp_zigbee_gateway.c | ✅ |
 | RF05 | Zigbee | esp_zigbee_gateway.c | ✅ |
 | RF06 | Regras | softap_sta.c | ✅ (simples, temporizadas e com janela de horário) |
-| RF07 | NVS | softap_sta.c | ⏳ |
+| RF07 | NVS | softap_sta.c, esp_zigbee_gateway.c | ✅ |
 | RF08 | Eventos Zigbee e Wi-Fi | softap_sta.c | ✅ (parcialmente) |
 
 ---
@@ -359,5 +362,6 @@ Para aprovação do TCC, o sistema deve:
 - [ ] Interface web completa
 - [ ] Aplicativo móvel
 - [ ] Integração com Home Assistant
-- [ ] Suporte a Matter
+- [ ] Suporte a Matter/Thread
+- [ ] Integração com dispositivos Wi-Fi proprietários, como Tuya/Elgin
 - [ ] Segurança (TLS, autenticação)

@@ -94,13 +94,11 @@ Desenvolver um hub/bridge de automação residencial baseado em ESP32 com capaci
 - [x] Zigbee Coordinator
 - [x] Comandos On/Off para dispositivos Zigbee
 
-### Em Desenvolvimento
+### Delimitação de escopo
 
-- [ ] Parser completo de comandos UART → Zigbee
-- [ ] Device Registry dinâmico
-- [ ] Motor de regras de automação
-- [ ] Interface web completa
-- [ ] Persistência de configurações
+- O MVP utiliza Zigbee e Wi-Fi local por HTTP/eventos.
+- Protocolos proprietários Tuya/Elgin não fazem parte da implementação.
+- Matter foi mantido como possibilidade de evolução, não como requisito do MVP.
 
 ---
 
@@ -116,24 +114,24 @@ Desenvolver um hub/bridge de automação residencial baseado em ESP32 com capaci
 
 ## Estado Atual
 
-O projeto está em fase de implementação, com:
+O projeto está em fase de consolidação, com:
 
-- ✅ Estrutura básica de comunicação UART funcionando
-- ✅ Wi-Fi configurado (AP+STA)
-- ✅ HTTP server com API básica
-- ✅ Zigbee Coordinator inicializado
-- ⏳ Integração UART → Zigbee em desenvolvimento
+- ✅ Comunicação UART bidirecional entre S3 e C6
+- ✅ Wi-Fi AP+STA e provisionamento BLE do S3
+- ✅ HTTP server com API local autenticada
+- ✅ Zigbee Coordinator e comandos On/Off
+- ✅ Motor de regras e temporizadores no S3
+- ✅ Persistência de configurações, regras e dispositivos em NVS
+- ✅ Métricas de latência e contadores operacionais
 
 ---
 
 ## Próximos Passos
 
-1. Implementar parser de comandos no C6
-2. Integrar comandos UART com ações Zigbee
-3. Desenvolver motor de regras no S3
-4. Criar interface web para configuração
-5. Testar com dispositivos reais
-6. Documentar resultados e métricas
+1. Executar testes finais de usabilidade e recuperação após reinicialização
+2. Medir latência e taxa de sucesso em uma amostra de comandos
+3. Testar regras com dispositivos Zigbee reais
+4. Consolidar resultados e limitações no TCC
 
 ---
 
