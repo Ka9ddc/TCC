@@ -25,6 +25,11 @@ export function describeTrigger(r: HubRule, name: (id: string) => string, unit?:
   return `${who} ${op} ${num(r.trigger_value)}${unit ? ` ${unit}` : ''}`;
 }
 
+export function describeTimeWindow(r: Pick<HubRule, 'start_time' | 'end_time'>): string | null {
+  if (!r.start_time || !r.end_time) return null;
+  return `das ${r.start_time} às ${r.end_time}`;
+}
+
 export function describeAction(a: RuleAction, name: (id: string) => string) {
   const parts = [`${a.action === 'on' ? 'ligar' : 'desligar'} ${name(a.device)}`];
   if (a.delay_seconds) parts.push(`após ${formatDuration(a.delay_seconds)}`);

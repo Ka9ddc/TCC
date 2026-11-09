@@ -22,7 +22,7 @@ function Gate() {
 
   useEffect(() => {
     if (!nav?.key || !ready) return;
-    if (!connection && segments[0] !== 'connect') router.replace('/connect');
+    if (!connection && segments[0] !== 'ble-provisioning') router.replace('/ble-provisioning');
   }, [nav?.key, ready, connection, segments, router]);
 
   useEffect(() => { if (ready) SplashScreen.hideAsync().catch(() => {}); }, [ready]);
@@ -33,6 +33,7 @@ function Gate() {
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: t.bg } }}>
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="connect" options={{ animation: 'fade' }} />
+        <Stack.Screen name="ble-provisioning" options={{ presentation: 'modal' }} />
         <Stack.Screen name="pairing" options={{ presentation: 'modal' }} />
         <Stack.Screen name="rule/[id]" options={{ presentation: 'modal' }} />
         <Stack.Screen name="scene/[id]" options={{ presentation: 'modal' }} />

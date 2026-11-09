@@ -10,7 +10,7 @@ import { T, useTheme } from '../../src/theme/theme';
 import { useHub } from '../../src/state/HubProvider';
 import { errorMessage } from '../../src/api/client';
 import { RuleDraft, RuleOperator } from '../../src/api/types';
-import { boolTriggerIsOn, OPERATORS, sampleValue } from '../../src/lib/rules';
+import { boolTriggerIsOn, describeTimeWindow, OPERATORS, sampleValue } from '../../src/lib/rules';
 
 interface ActionState { device: string; action: 'on' | 'off'; delay: number; duration: number }
 const MAX_ACTIONS = 4; // MAX_RULE_ACTIONS no firmware
@@ -35,6 +35,8 @@ export default function RuleEditor() {
   const [operator, setOperator] = useState<RuleOperator>('less_than');
   const [valueText, setValueText] = useState('200');
   const [eventName, setEventName] = useState('state_changed');
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
   const [actions, setActions] = useState<ActionState[]>([]);
   const [picker, setPicker] = useState<null | 'trigger' | number>(null);
   const [saving, setSaving] = useState(false);
@@ -65,6 +67,8 @@ export default function RuleEditor() {
         setKind('number'); setOperator(existing.operator); setValueText(String(existing.trigger_value));
       }
       setActions(existing.actions.map((a) => ({ device: a.device, action: a.action, delay: a.delay_seconds ?? 0, duration: a.duration_seconds ?? 0 })));
+      setStartTime(existing.start_time ?? '');
+      setEndTime(existing.end_time ?? '');
       setReady(true);
       return;
     }
@@ -90,6 +94,11 @@ export default function RuleEditor() {
   if (!trigger) errors.push('Escolha o que dispara a automação.');
   if (kind === 'number' && (valueText.trim() === '' || Number.isNaN(numeric))) errors.push('Informe um valor numérico válido.');
   if (kind === 'number' && !eventName.trim()) errors.push('Informe o nome do evento do sensor.');
+  const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const hasTime = startTime !== '' || endTime !== '';
+  if (hasTime && (!timePattern.test(startTime) || !timePattern.test(endTime))) {
+    errors.push('Informe a janela no formato HH:MM, por exemplo 18:30.');
+  }
   if (actions.length === 0 || actions.some((a) => !a.device)) errors.push('Escolha o dispositivo de cada ação.');
   if (ruleId === undefined && hub.rules.length >= MAX_RULES) errors.push('O hub já tem 8 regras. Apague uma antes de criar outra.');
 
@@ -105,6 +114,7 @@ export default function RuleEditor() {
       ...(a.delay > 0 ? { delay_seconds: a.delay } : {}),
       ...(a.duration > 0 ? { duration_seconds: a.duration } : {}),
     })),
+    ...(startTime && endTime ? { start_time: startTime, end_time: endTime } : {}),
   });
 
   const save = async () => {
@@ -198,6 +208,25 @@ export default function RuleEditor() {
           </View>
         )}
       </Card>
+      {hub.config?.time_synced !== undefined ? (
+        <>
+          <SectionTitle title="Janela de horário (opcional)" />
+          <Card>
+            <T v="small" c="inkSoft" w={400} style={{ marginBottom: 12 }}>
+              A regra só será avaliada dentro deste intervalo. Use HH:MM; horários que atravessam a meia-noite são aceitos.
+            </T>
+            <Field label="Início" value={startTime} onChangeText={setStartTime} placeholder="18:30" keyboardType="numbers-and-punctuation" />
+            <Field label="Fim" value={endTime} onChangeText={setEndTime} placeholder="23:00" keyboardType="numbers-and-punctuation" />
+            {startTime && endTime && !errors.some((e) => e.includes('janela')) ? (
+              <T v="small" c="signal" w={600}>Ativa {describeTimeWindow({ start_time: startTime, end_time: endTime })}</T>
+            ) : null}
+          </Card>
+        </>
+      ) : (
+        <T v="small" c="inkMuted" w={400} style={{ marginTop: 16 }}>
+          Janelas de horário ainda não estão disponíveis neste firmware do hub.
+        </T>
+      )}
       <T v="small" c="inkMuted" w={400} style={{ marginTop: 8 }}>
         A regra dispara quando a condição passa a valer e só dispara de novo depois que ela deixar de valer.
       </T>

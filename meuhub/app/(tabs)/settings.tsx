@@ -26,6 +26,9 @@ export default function Settings() {
         <Row icon="home-outline" title="Rede doméstica (STA)" subtitle={config ? config.sta_ssid : '—'}
           right={config ? <T v="small" c={config.sta_connected ? 'signal' : 'danger'} w={700}>{config.sta_connected ? 'Conectado' : 'Desconectado'}</T> : undefined} />
         <Row icon="wifi" title="Rede do hub (AP)" subtitle={config ? `${config.ap_ssid} · ${config.ap_connected_clients} conectado(s)` : '—'} />
+        <Row icon="time-outline" title="Relógio do hub"
+          subtitle={config?.time_synced === undefined ? 'Firmware sem sincronização anunciada' : config.time_synced ? `${config.timezone ?? 'Horário local'} · ${config.local_time ?? 'sincronizado'}` : 'Aguardando sincronização'}
+        />
         <Row icon="time-outline" title="Ligado há" subtitle={status ? formatUptime(status.uptime_seconds) : '—'} last />
       </Card>
       {config?.restart_required ? <View style={{ marginTop: 12 }}><Banner tone="warn" icon="refresh-circle-outline" title="Reinício pendente" body="Desligue e ligue o hub para aplicar a nova configuração de Wi-Fi." /></View> : null}
@@ -33,6 +36,7 @@ export default function Settings() {
       <SectionTitle title="Configuração" />
       <Card style={{ paddingVertical: 4 }}>
         <Row icon="wifi" title="Wi-Fi do hub" subtitle="Rede doméstica e rede própria do hub" onPress={() => router.push('/wifi')} />
+        <Row icon="bluetooth-outline" title="Provisionar por Bluetooth" subtitle="Configure o Wi-Fi sem digitar o endereço" onPress={() => router.push('/ble-provisioning')} />
         <Row icon="shield-checkmark-outline" title="Segurança" subtitle="Token de acesso à API" onPress={() => router.push('/security')} last />
       </Card>
 

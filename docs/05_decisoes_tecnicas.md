@@ -366,6 +366,34 @@ Deixar segurança (autenticação, criptografia) para trabalhos futuros.
 - ❌ Inseguro (mas documentado)
 - ❌ Trabalho futuro necessário
 
+## 11. Motor de Regras Local
+
+### Decisão
+
+Manter o motor de regras no ESP32-S3, com regras persistidas em NVS e
+acionamento das saídas Zigbee por meio da fila UART para o ESP32-C6.
+
+### Contrato atual
+
+- Até 8 regras persistidas.
+- Uma condição por regra, com operadores booleanos e numéricos.
+- Até 4 ações por regra.
+- Atraso e duração por ação, limitados a 24 horas.
+- Janela opcional `start_time`/`end_time` no formato `HH:MM`.
+- Eventos de teste em `POST /api/test/events`.
+- Regras protegidas por autenticação nas rotas REST.
+
+O aplicativo `meuhub` edita exatamente esse contrato. Condições compostas não
+fazem parte da versão atual porque não há editor nem payload correspondente no
+app.
+
+### Segurança de atualização
+
+O firmware valida uma regra inteira em uma estrutura temporária antes de
+substituir a regra ativa e persistir em NVS. Assim, um JSON inválido não
+corrompe parcialmente uma regra já configurada. Regras com janela dependem da
+sincronização SNTP; sem relógio válido, a condição não dispara.
+
 ---
 
 ## Lições Aprendidas

@@ -36,6 +36,9 @@ export interface HubStatus {
   history_entries: number;
   configured_rules: number;
   enabled_rules: number;
+  time_synced?: boolean;
+  timezone?: string;
+  local_time?: string;
   device_discovered: boolean;
   device_online: boolean;
   wifi_sensor_discovered: boolean;
@@ -59,6 +62,8 @@ export interface HubRule {
   trigger_value: boolean | number;
   operator: RuleOperator;
   actions: RuleAction[];
+  start_time?: string;
+  end_time?: string;
 }
 export type RuleDraft = Omit<HubRule, 'id' | 'configured'> & { id?: number };
 
@@ -79,6 +84,9 @@ export interface HubConfig {
   ap_connected_clients: number;
   ap_enabled: boolean;
   restart_required: boolean;
+  time_synced?: boolean;
+  timezone?: string;
+  local_time?: string;
 }
 
 export interface CommandResult {

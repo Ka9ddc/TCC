@@ -1,4 +1,4 @@
-idf_component_register(SRCS "softap_sta.c"
+idf_component_register(SRCS "softap_sta.c" "ble_provisioning.c"
                     PRIV_REQUIRES esp_wifi nvs_flash
                     INCLUDE_DIRS "."
                     REQUIRES
@@ -9,4 +9,5 @@ idf_component_register(SRCS "softap_sta.c"
                         json
                         esp_http_server
                         esp_timer
+                        bt
                     )

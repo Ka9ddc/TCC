@@ -6,7 +6,7 @@ import { useToast } from '../../src/components/Toast';
 import { T, useTheme } from '../../src/theme/theme';
 import { useHub } from '../../src/state/HubProvider';
 import { errorMessage } from '../../src/api/client';
-import { describeAction, describeTrigger } from '../../src/lib/rules';
+import { describeAction, describeTimeWindow, describeTrigger } from '../../src/lib/rules';
 
 const MAX_RULES = 8; // MAX_AUTOMATION_RULES no firmware
 
@@ -20,6 +20,7 @@ export default function Automations() {
   const hasSensor = hub.devices.some((d) => d.type !== 'on_off');
   const hasSwitch = hub.devices.some((d) => d.type === 'on_off');
   const unitOf = (id: string) => hub.devices.find((d) => d.id === id)?.unit;
+  const timeSupport = hub.config?.time_synced !== undefined;
 
   const setEnabled = async (r: (typeof hub.rules)[number], v: boolean) => {
     try { await hub.setRuleEnabled(r, v); } catch (e) { toast.show(errorMessage(e), 'error'); }
@@ -37,7 +38,7 @@ export default function Automations() {
         <Empty
           icon="git-network-outline" title="Nenhuma automação"
           body="Automações ligam ou desligam dispositivos quando algo acontece, como a luz do ambiente cair."
-          action={<Button label="Criar automação" small icon="add" onPress={() => router.push('/rule/new')} />}
+          action={<Button label="Criar automação" small icon="add" onPress={() => router.push({ pathname: '/rule/[id]', params: { id: 'new' } })} />}
         />
       ) : (
         <View style={{ gap: 12 }}>
@@ -51,6 +52,7 @@ export default function Automations() {
               </View>
               <T v="body" c="inkSoft" style={{ marginTop: 8 }}>
                 Quando {describeTrigger(r, hub.displayName, unitOf(r.trigger_device))}
+                {describeTimeWindow(r) ? ` · ${describeTimeWindow(r)}` : ''}
               </T>
               <T v="body" style={{ marginTop: 2 }}>
                 {r.actions.map((a) => describeAction(a, hub.displayName)).join(' e ').replace(/^./, (c) => c.toUpperCase())}
@@ -60,17 +62,23 @@ export default function Automations() {
         </View>
       )}
 
+      {!timeSupport ? (
+        <T v="small" c="inkMuted" w={400} style={{ marginTop: 16 }}>
+          Janelas de horário estarão disponíveis quando o firmware do hub anunciar a sincronização do relógio.
+        </T>
+      ) : null}
+
       {!full && hasSwitch ? (
         <>
           <SectionTitle title="Ideias" />
           <View style={{ gap: 12 }}>
             {hasSensor ? (
-              <Card onPress={() => router.push({ pathname: '/rule/new', params: { template: 'dark' } })}>
+              <Card onPress={() => router.push({ pathname: '/rule/[id]', params: { id: 'new', template: 'dark' } })}>
                 <T v="h3">Acender quando escurecer</T>
                 <T v="small" c="inkSoft" w={400}>Liga uma luz quando o sensor de luminosidade ficar abaixo de um valor.</T>
               </Card>
             ) : null}
-            <Card onPress={() => router.push({ pathname: '/rule/new', params: { template: 'timer' } })}>
+            <Card onPress={() => router.push({ pathname: '/rule/[id]', params: { id: 'new', template: 'timer' } })}>
               <T v="h3">Apagar sozinho depois de um tempo</T>
               <T v="small" c="inkSoft" w={400}>Quando uma luz ligar, desliga de novo após alguns minutos.</T>
             </Card>

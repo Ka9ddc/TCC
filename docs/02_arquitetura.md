@@ -76,13 +76,15 @@ O sistema é composto por uma arquitetura distribuída com dois microcontrolador
 | **HTTP Server** | API REST para controle de dispositivos |
 | **UART Protocol** | Envia comandos e recebe eventos do C6 |
 | **Storage (NVS)** | Persiste configurações e regras |
-| **Rule Engine** | Executa regras de automação (em desenvolvimento) |
+| **Rule Engine** | Executa regras de automação, incluindo janelas de horário local |
+| **Time Sync** | Sincroniza o relógio via SNTP após conexão STA |
 
 **Responsabilidades:**
 - Interface com usuário (HTTP/Web)
 - Lógica de automação
 - Armazenamento de configurações
 - Comunicação com C6 via UART
+- Avaliação segura de janelas de horário somente após sincronização do relógio
 
 ### ESP32-C6 (Bridge de Comunicação)
 
@@ -172,6 +174,21 @@ O sistema é composto por uma arquitetura distribuída com dois microcontrolador
 5. Rule Engine → HTTP Server
    Atualiza estado, notifica clientes
 ```
+
+### Fluxo 3: Regra com janela de horário
+
+```
+1. S3 obtém IP na rede STA
+2. S3 inicia SNTP e configura o timezone local BRT3 (UTC-3)
+3. O relógio confirma a sincronização
+4. A regra recebe start_time/end_time no formato HH:MM
+5. Evento recebido → condição da regra + janela de horário
+6. Ação só é enfileirada se o horário local estiver dentro da janela
+```
+
+Regras antigas, sem `start_time` e `end_time`, continuam funcionando sem
+depender do relógio. Se uma regra possuir janela e o relógio ainda não estiver
+sincronizado, ela não dispara.
 
 ---
 
