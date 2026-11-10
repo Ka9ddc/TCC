@@ -69,6 +69,8 @@ export default function Diagnostics() {
         {stat('Respostas OK do C6', s?.uart_success_responses)}
         {stat('Respostas com erro', s?.uart_error_responses, (s?.uart_error_responses ?? 0) > 0)}
         {stat('Timeouts de comando', s?.command_timeouts, (s?.command_timeouts ?? 0) > 0)}
+        {stat('Latência média', s ? `${Math.round(s.command_latency_avg_ms ?? 0)} ms` : undefined)}
+        {stat('Latência máxima', s ? `${s.command_latency_max_ms ?? 0} ms` : undefined)}
         {stat('Comandos pendentes', s?.pending_commands)}
         {stat('Mensagens UART inválidas', s?.uart_invalid_messages, (s?.uart_invalid_messages ?? 0) > 0)}
         {stat('Respostas sem pedido', s?.uart_unknown_responses)}

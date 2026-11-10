@@ -98,6 +98,9 @@ export class HubClient {
   setWifi(cfg: { sta_ssid: string; sta_password: string; ap_ssid: string; ap_password: string }) {
     return this.request<{ status: string; restart_required: boolean }>('POST', '/api/config/wifi', cfg);
   }
+  startBleProvisioning() {
+    return this.request<{ status: string; service_version: number }>('POST', '/api/provisioning/ble');
+  }
   setToken(token: string) {
     return this.request<{ status: string }>('POST', '/api/config/auth', { token });
   }

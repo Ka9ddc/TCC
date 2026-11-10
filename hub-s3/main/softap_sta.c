@@ -1,3 +1,4 @@
+// softap_sta.c
 /*
  * SPDX-FileCopyrightText: 2023-2024 Espressif Systems (Shanghai) CO LTD
  *
@@ -9,6 +10,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <math.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -24,10 +26,10 @@
 #include "esp_http_server.h"
 #include "cJSON.h"
 #include "nvs.h"
+#include "esp_sntp.h"
+#include "ble_provisioning.h"
 
 /* STA Configuration */
-#define EXAMPLE_ESP_WIFI_STA_SSID "EQUIPE K"
-#define EXAMPLE_ESP_WIFI_STA_PASSWD "12345678"
 #define EXAMPLE_ESP_MAXIMUM_RETRY 5
 
 /* AP Configuration */
@@ -51,12 +53,15 @@
 #define LUMINOSITY_MIN_DELTA 5.0
 #define WIFI_SENSOR_MIN_INTERVAL_SECONDS 2
 #define MAX_RULE_ACTIONS 4
+#define MAX_ACTION_DELAY_SECONDS (24U * 60U * 60U)
+#define MAX_ACTION_DURATION_SECONDS (24U * 60U * 60U)
 #define ACTION_QUEUE_LENGTH 16
 #define MAX_PENDING_COMMANDS 16
 #define MAX_ZIGBEE_DEVICES 8
 #define UART_PROTOCOL_VERSION 1
 #define HUB_API_TOKEN_DEFAULT "TCC-Hub-2026-Local"
 #define HUB_API_TOKEN_MAX_LENGTH 63
+#define HUB_TIMEZONE "BRT3"
 
 static const char *TAG_AP = "WiFi SoftAP";
 static const char *TAG_STA = "WiFi Sta";
@@ -67,10 +72,13 @@ static int s_retry_num = 0;
 static int s_next_request_id = 1;
 static EventGroupHandle_t s_wifi_event_group;
 static char s_api_token[HUB_API_TOKEN_MAX_LENGTH + 1] = HUB_API_TOKEN_DEFAULT;
-static char s_sta_ssid[WIFI_CONFIG_MAX_LENGTH + 1] = EXAMPLE_ESP_WIFI_STA_SSID;
-static char s_sta_password[WIFI_CONFIG_MAX_LENGTH + 1] = EXAMPLE_ESP_WIFI_STA_PASSWD;
+static char s_sta_ssid[WIFI_CONFIG_MAX_LENGTH + 1] = "";
+static char s_sta_password[WIFI_CONFIG_MAX_LENGTH + 1] = "";
 static char s_ap_ssid[WIFI_CONFIG_MAX_LENGTH + 1] = EXAMPLE_ESP_WIFI_AP_SSID;
 static char s_ap_password[WIFI_CONFIG_MAX_LENGTH + 1] = EXAMPLE_ESP_WIFI_AP_PASSWD;
+static volatile bool s_time_synced;
+static bool s_time_sync_started;
+static bool s_wifi_configured;
 
 typedef struct {
     bool discovered;
@@ -132,6 +140,11 @@ static uint32_t s_uart_error_count;
 static uint32_t s_uart_invalid_message_count;
 static uint32_t s_uart_unknown_response_count;
 static uint32_t s_uart_duplicate_response_count;
+static uint32_t s_command_latency_count;
+static uint64_t s_command_latency_total_us;
+static uint32_t s_command_latency_min_us;
+static uint32_t s_command_latency_max_us;
+static uint32_t s_last_command_latency_us;
 static int64_t s_last_event_us;
 static bool s_rule_execution_active;
 
@@ -171,14 +184,16 @@ static void wifi_config_load(void)
         return;
     }
     size_t size = sizeof(s_sta_ssid);
-    nvs_get_str(handle, "sta_ssid", s_sta_ssid, &size);
+    esp_err_t ssid_err = nvs_get_str(handle, "sta_ssid", s_sta_ssid, &size);
     size = sizeof(s_sta_password);
-    nvs_get_str(handle, "sta_pass", s_sta_password, &size);
+    esp_err_t password_err = nvs_get_str(handle, "sta_pass", s_sta_password, &size);
     size = sizeof(s_ap_ssid);
     nvs_get_str(handle, "ap_ssid", s_ap_ssid, &size);
     size = sizeof(s_ap_password);
     nvs_get_str(handle, "ap_pass", s_ap_password, &size);
     nvs_close(handle);
+    s_wifi_configured = ssid_err == ESP_OK && password_err == ESP_OK &&
+                        s_sta_ssid[0] != '\0';
 }
 
 static esp_err_t wifi_config_save(const char *sta_ssid, const char *sta_password,
@@ -195,6 +210,9 @@ static esp_err_t wifi_config_save(const char *sta_ssid, const char *sta_password
     if (err == ESP_OK) err = nvs_set_str(handle, "ap_pass", ap_password);
     if (err == ESP_OK) err = nvs_commit(handle);
     nvs_close(handle);
+    if (err == ESP_OK) {
+        s_wifi_configured = sta_ssid[0] != '\0';
+    }
     return err;
 }
 
@@ -217,6 +235,28 @@ static bool api_request_is_authenticated(httpd_req_t *req)
         return false;
     }
     return true;
+}
+
+static esp_err_t ble_wifi_save_callback(
+    const char *ssid,
+    const char *password
+);
+
+static esp_err_t api_ble_provisioning_post_handler(httpd_req_t *req)
+{
+    if (!api_request_is_authenticated(req)) {
+        return ESP_FAIL;
+    }
+    esp_err_t err = ble_provisioning_start(ble_wifi_save_callback);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG_HTTP, "Falha ao iniciar provisionamento BLE: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Falha ao iniciar Bluetooth");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ble_provisioning_started\",\"service_version\":1}");
+    return ESP_OK;
 }
 
 static esp_err_t api_root_get_handler(httpd_req_t *req)
@@ -304,6 +344,9 @@ typedef struct {
     char operator[20];
     automation_action_t actions[MAX_RULE_ACTIONS];
     size_t action_count;
+    bool time_window_enabled;
+    uint16_t start_minute;
+    uint16_t end_minute;
     bool condition_active;
 } automation_rule_t;
 
@@ -376,6 +419,18 @@ static cJSON *rule_to_json(const automation_rule_t *rule)
         cJSON_AddBoolToObject(json, "trigger_value", rule->trigger_value_bool);
     }
     cJSON_AddStringToObject(json, "operator", rule->operator);
+    if (rule->time_window_enabled) {
+        char start_time[16];
+        char end_time[16];
+        snprintf(start_time, sizeof(start_time), "%02u:%02u",
+                 (unsigned)((rule->start_minute / 60) % 24),
+                 (unsigned)(rule->start_minute % 60));
+       snprintf(end_time, sizeof(end_time), "%02u:%02u",
+                 (unsigned)((rule->end_minute / 60) % 24),
+                 (unsigned)(rule->end_minute % 60));
+        cJSON_AddStringToObject(json, "start_time", start_time);
+        cJSON_AddStringToObject(json, "end_time", end_time);
+    }
     cJSON *actions = cJSON_AddArrayToObject(json, "actions");
     for (size_t i = 0; i < rule->action_count; i++) {
         cJSON *action = cJSON_CreateObject();
@@ -402,6 +457,29 @@ static bool operator_is_valid(const char *operator)
            strcmp(operator, "less_or_equal") == 0;
 }
 
+static bool parse_time_of_day(const cJSON *item, uint16_t *minutes)
+{
+    if (minutes == NULL || !cJSON_IsString(item) ||
+        item->valuestring == NULL || strlen(item->valuestring) != 5 ||
+        item->valuestring[2] != ':' ||
+        item->valuestring[0] < '0' || item->valuestring[0] > '9' ||
+        item->valuestring[1] < '0' || item->valuestring[1] > '9' ||
+        item->valuestring[3] < '0' || item->valuestring[3] > '9' ||
+        item->valuestring[4] < '0' || item->valuestring[4] > '9') {
+        return false;
+    }
+
+    uint16_t hour = (uint16_t)((item->valuestring[0] - '0') * 10 +
+                               (item->valuestring[1] - '0'));
+    uint16_t minute = (uint16_t)((item->valuestring[3] - '0') * 10 +
+                                 (item->valuestring[4] - '0'));
+    if (hour > 23 || minute > 59) {
+        return false;
+    }
+    *minutes = (uint16_t)(hour * 60 + minute);
+    return true;
+}
+
 static bool rule_from_json(cJSON *json, automation_rule_t *rule, uint32_t default_id)
 {
     cJSON *trigger_device = cJSON_GetObjectItem(json, "trigger_device");
@@ -423,6 +501,17 @@ static bool rule_from_json(cJSON *json, automation_rule_t *rule, uint32_t defaul
     }
     snprintf(rule->trigger_device, sizeof(rule->trigger_device), "%s", trigger_device->valuestring);
     snprintf(rule->trigger_event, sizeof(rule->trigger_event), "%s", trigger_event->valuestring);
+    rule->time_window_enabled = false;
+    cJSON *start_time = cJSON_GetObjectItem(json, "start_time");
+    cJSON *end_time = cJSON_GetObjectItem(json, "end_time");
+    if (start_time != NULL || end_time != NULL) {
+        if (start_time == NULL || end_time == NULL ||
+            !parse_time_of_day(start_time, &rule->start_minute) ||
+            !parse_time_of_day(end_time, &rule->end_minute)) {
+            return false;
+        }
+        rule->time_window_enabled = true;
+    }
     if (cJSON_IsNumber(trigger_value)) {
         rule->trigger_value_type = EVENT_VALUE_NUMBER;
         rule->trigger_value_number = trigger_value->valuedouble;
@@ -459,8 +548,14 @@ static bool rule_from_json(cJSON *json, automation_rule_t *rule, uint32_t defaul
                 strlen(action->valuestring) >= sizeof(rule->actions[i].action) ||
                 (strcmp(action->valuestring, "on") != 0 &&
                  strcmp(action->valuestring, "off") != 0) ||
-                (delay != NULL && (!cJSON_IsNumber(delay) || delay->valueint < 0)) ||
-                (duration != NULL && (!cJSON_IsNumber(duration) || duration->valueint < 0))) {
+                (delay != NULL && (!cJSON_IsNumber(delay) ||
+                                   delay->valuedouble < 0 ||
+                                   delay->valuedouble > MAX_ACTION_DELAY_SECONDS ||
+                                   floor(delay->valuedouble) != delay->valuedouble)) ||
+                (duration != NULL && (!cJSON_IsNumber(duration) ||
+                                      duration->valuedouble < 0 ||
+                                      duration->valuedouble > MAX_ACTION_DURATION_SECONDS ||
+                                      floor(duration->valuedouble) != duration->valuedouble))) {
                 return false;
             }
             snprintf(rule->actions[i].device, sizeof(rule->actions[i].device), "%s", device->valuestring);
@@ -580,8 +675,22 @@ static bool pending_command_finish(int request_id, command_result_t result,
             s_pending_commands[i].active = false;
             command_waiter_t *waiter = s_pending_commands[i].waiter;
             s_pending_commands[i].waiter = NULL;
+            uint64_t latency_us = (uint64_t)(esp_timer_get_time() -
+                                             s_pending_commands[i].sent_at_us);
+            uint32_t latency_ms = (uint32_t)(latency_us / 1000U);
+            s_command_latency_count++;
+            s_command_latency_total_us += latency_us;
+            s_last_command_latency_us = latency_ms;
+            if (s_command_latency_min_us == 0 || latency_ms < s_command_latency_min_us) {
+                s_command_latency_min_us = latency_ms;
+            }
+            if (latency_ms > s_command_latency_max_us) {
+                s_command_latency_max_us = latency_ms;
+            }
             ESP_LOGI(TAG_HTTP, "Comando %d concluido com status=%s",
                      request_id, status);
+            ESP_LOGI(TAG_HTTP, "Latencia do comando %d: %lu ms",
+                     request_id, (unsigned long)latency_ms);
             if (waiter != NULL) {
                 waiter->result = result;
                 xSemaphoreGive(waiter->semaphore);
@@ -748,6 +857,30 @@ static bool rule_condition_matches(const automation_rule_t *rule,
     return false;
 }
 
+static bool rule_time_window_matches(const automation_rule_t *rule)
+{
+    if (!rule->time_window_enabled) {
+        return true;
+    }
+    if (!s_time_synced) {
+        return false;
+    }
+
+    time_t now = time(NULL);
+    struct tm local_time;
+    if (now < 1577836800 || localtime_r(&now, &local_time) == NULL) {
+        return false;
+    }
+
+    uint16_t current_minute = (uint16_t)(local_time.tm_hour * 60 + local_time.tm_min);
+    if (rule->start_minute <= rule->end_minute) {
+        return current_minute >= rule->start_minute &&
+               current_minute <= rule->end_minute;
+    }
+    return current_minute >= rule->start_minute ||
+           current_minute <= rule->end_minute;
+}
+
 static bool automation_process_event(const char *device, const char *event,
                                      const event_value_t *value)
 {
@@ -761,7 +894,8 @@ static bool automation_process_event(const char *device, const char *event,
     s_rule_execution_active = true;
     for (size_t i = 0; i < MAX_AUTOMATION_RULES; i++) {
         automation_rule_t *rule = &s_rules[i];
-        bool condition_matches = rule_condition_matches(rule, device, event, value);
+        bool condition_matches = rule_condition_matches(rule, device, event, value) &&
+                                 rule_time_window_matches(rule);
         if (condition_matches && !rule->condition_active) {
             rule->condition_active = true;
             s_rule_match_count++;
@@ -1021,6 +1155,29 @@ static void wifi_sensor_timeout_task(void *arg)
     }
 }
 
+static void time_sync_notification_cb(struct timeval *tv)
+{
+    (void)tv;
+    s_time_synced = true;
+    ESP_LOGI(TAG_STA, "Horario sincronizado via SNTP");
+}
+
+static void time_sync_start(void)
+{
+    if (s_time_sync_started) {
+        return;
+    }
+
+    setenv("TZ", HUB_TIMEZONE, 1);
+    tzset();
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+    esp_sntp_init();
+    s_time_sync_started = true;
+    ESP_LOGI(TAG_STA, "Sincronizacao SNTP iniciada, timezone=%s", HUB_TIMEZONE);
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -1032,14 +1189,35 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *) event_data;
         ESP_LOGI(TAG_AP, "Station "MACSTR" left, AID=%d, reason:%d",
                  MAC2STR(event->mac), event->aid, event->reason);
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT &&
+         event_id == WIFI_EVENT_STA_START) {
         ESP_LOGI(TAG_STA, "Station started");
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
-        ESP_LOGI(TAG_STA, "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
+
+        if (s_wifi_configured) {
+            esp_wifi_connect();
+        }
+    } else if (event_base == IP_EVENT &&
+         event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+
+        ESP_LOGI(
+            TAG_STA,
+            "Got IP: " IPSTR,
+            IP2STR(&event->ip_info.ip)
+        );
+
         s_retry_num = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+
+        xEventGroupSetBits(
+            s_wifi_event_group,
+            WIFI_CONNECTED_BIT
+        );
+
+        time_sync_start();
+
+        char ip[16];
+        snprintf(ip, sizeof(ip), IPSTR, IP2STR(&event->ip_info.ip));
+        ble_provisioning_set_wifi_connected(true, ip);
     }
 }
 
@@ -1072,14 +1250,176 @@ static esp_netif_t *wifi_init_softap(void)
     return esp_netif_ap;
 }
 
+static esp_netif_t *s_sta_netif = NULL;
+
+static esp_err_t wifi_apply_sta_config(
+    const char *ssid,
+    const char *password
+)
+{
+    wifi_mode_t mode;
+
+    esp_err_t err = esp_wifi_get_mode(&mode);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG_STA,
+            "Falha ao obter modo Wi-Fi: %s",
+            esp_err_to_name(err)
+        );
+        return err;
+    }
+
+    /* Se o hub ainda estiver somente em AP, habilita APSTA */
+    if (mode != WIFI_MODE_APSTA) {
+        ESP_LOGI(
+            TAG_STA,
+            "Habilitando modo APSTA para provisionamento"
+        );
+
+        err = esp_wifi_stop();
+
+        if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_STARTED) {
+            ESP_LOGE(
+                TAG_STA,
+                "Falha ao parar Wi-Fi: %s",
+                esp_err_to_name(err)
+            );
+            return err;
+        }
+
+        err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+
+        if (err != ESP_OK) {
+            ESP_LOGE(
+                TAG_STA,
+                "Falha ao habilitar APSTA: %s",
+                esp_err_to_name(err)
+            );
+            return err;
+        }
+
+        err = esp_wifi_start();
+
+        if (err != ESP_OK) {
+            ESP_LOGE(
+                TAG_STA,
+                "Falha ao reiniciar Wi-Fi: %s",
+                esp_err_to_name(err)
+            );
+            return err;
+        }
+    }
+
+    /* Usa a interface STA criada no boot; cria apenas se necessário */
+    if (s_sta_netif == NULL) {
+        s_sta_netif = esp_netif_create_default_wifi_sta();
+
+        if (s_sta_netif == NULL) {
+            ESP_LOGE(TAG_STA, "Falha ao criar interface STA");
+            return ESP_FAIL;
+        }
+
+        esp_netif_set_default_netif(s_sta_netif);
+    }
+
+    /* Sempre desconecta antes de trocar SSID/senha */
+    err = esp_wifi_disconnect();
+
+    if (err != ESP_OK &&
+        err != ESP_ERR_WIFI_NOT_STARTED &&
+        err != ESP_ERR_WIFI_CONN) {
+        ESP_LOGW(
+            TAG_STA,
+            "Falha ao desconectar STA: %s",
+            esp_err_to_name(err)
+        );
+    }
+
+    wifi_config_t wifi_config = {0};
+
+    strlcpy(
+        (char *)wifi_config.sta.ssid,
+        ssid,
+        sizeof(wifi_config.sta.ssid)
+    );
+
+    strlcpy(
+        (char *)wifi_config.sta.password,
+        password,
+        sizeof(wifi_config.sta.password)
+    );
+
+    err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG_STA,
+            "Falha ao configurar STA: %s",
+            esp_err_to_name(err)
+        );
+        return err;
+    }
+
+    err = esp_wifi_connect();
+
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG_STA,
+            "Falha ao iniciar conexao STA: %s",
+            esp_err_to_name(err)
+        );
+        return err;
+    }
+
+    ESP_LOGI(
+        TAG_STA,
+        "Nova configuracao Wi-Fi aplicada: %s",
+        ssid
+    );
+
+    return ESP_OK;
+}
+
+
+static esp_err_t ble_wifi_save_callback(
+    const char *ssid,
+    const char *password
+)
+{
+    esp_err_t err = wifi_config_save(
+        ssid,
+        password,
+        s_ap_ssid,
+        s_ap_password
+    );
+
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG_STA,
+            "Falha ao salvar credenciais Wi-Fi: %s",
+            esp_err_to_name(err)
+        );
+        return err;
+    }
+
+    snprintf(s_sta_ssid, sizeof(s_sta_ssid), "%s", ssid);
+    snprintf(s_sta_password, sizeof(s_sta_password), "%s", password);
+
+    return wifi_apply_sta_config(ssid, password);
+}
+
 static esp_netif_t *wifi_init_sta(void)
 {
-    esp_netif_t *esp_netif_sta = esp_netif_create_default_wifi_sta();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+
+    if (s_sta_netif == NULL) {
+        ESP_LOGE(TAG_STA, "Falha ao criar interface STA");
+        return NULL;
+    }
 
     wifi_config_t wifi_sta_config = {
         .sta = {
-            .ssid = "",
-            .password = "",
             .scan_method = WIFI_ALL_CHANNEL_SCAN,
             .failure_retry_cnt = EXAMPLE_ESP_MAXIMUM_RETRY,
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
@@ -1087,12 +1427,29 @@ static esp_netif_t *wifi_init_sta(void)
         },
     };
 
-    snprintf((char *)wifi_sta_config.sta.ssid, sizeof(wifi_sta_config.sta.ssid), "%.31s", s_sta_ssid);
-    snprintf((char *)wifi_sta_config.sta.password, sizeof(wifi_sta_config.sta.password), "%s", s_sta_password);
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_sta_config));
-    ESP_LOGI(TAG_STA, "wifi_init_sta finished for SSID:%s.", s_sta_ssid);
+    strlcpy(
+        (char *)wifi_sta_config.sta.ssid,
+        s_sta_ssid,
+        sizeof(wifi_sta_config.sta.ssid)
+    );
 
-    return esp_netif_sta;
+    strlcpy(
+        (char *)wifi_sta_config.sta.password,
+        s_sta_password,
+        sizeof(wifi_sta_config.sta.password)
+    );
+
+    ESP_ERROR_CHECK(
+        esp_wifi_set_config(WIFI_IF_STA, &wifi_sta_config)
+    );
+
+    ESP_LOGI(
+        TAG_STA,
+        "wifi_init_sta finished for SSID:%s",
+        s_sta_ssid
+    );
+
+    return s_sta_netif;
 }
 
 static void uart_receive_task(void *pvParameters)
@@ -1441,13 +1798,17 @@ static esp_err_t api_rules_post_handler(httpd_req_t *req)
             }
         }
     }
-    if (slot == MAX_AUTOMATION_RULES || !rule_from_json(root, &s_rules[slot], (uint32_t)slot + 1)) {
+    automation_rule_t replacement = {0};
+    bool valid = slot < MAX_AUTOMATION_RULES &&
+                 rule_from_json(root, &replacement, (uint32_t)slot + 1);
+    if (!valid) {
         cJSON_Delete(root);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                             slot == MAX_AUTOMATION_RULES ? "Limite de regras atingido" : "Campos de regra invalidos");
         return ESP_FAIL;
     }
-    uint32_t saved_id = s_rules[slot].id;
+    s_rules[slot] = replacement;
+    uint32_t saved_id = replacement.id;
     cJSON_Delete(root);
     rules_save();
     httpd_resp_set_type(req, "application/json");
@@ -1640,6 +2001,17 @@ static esp_err_t api_status_get_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(status, "uart_duplicate_responses",
                             s_uart_duplicate_response_count);
     cJSON_AddNumberToObject(status, "command_timeouts", s_command_timeout_count);
+    cJSON_AddNumberToObject(status, "command_latency_samples", s_command_latency_count);
+    cJSON_AddNumberToObject(status, "command_latency_last_ms", s_last_command_latency_us);
+    cJSON_AddNumberToObject(status, "command_latency_min_ms", s_command_latency_min_us);
+    cJSON_AddNumberToObject(status, "command_latency_max_ms", s_command_latency_max_us);
+    cJSON_AddNumberToObject(
+        status,
+        "command_latency_avg_ms",
+        s_command_latency_count == 0
+            ? 0
+            : (double)s_command_latency_total_us /
+                  ((double)s_command_latency_count * 1000.0));
     size_t pending_commands = 0;
     if (s_command_mutex != NULL &&
         xSemaphoreTake(s_command_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1664,6 +2036,18 @@ static esp_err_t api_status_get_handler(httpd_req_t *req)
     }
     cJSON_AddNumberToObject(status, "configured_rules", configured_rules);
     cJSON_AddNumberToObject(status, "enabled_rules", enabled_rules);
+    cJSON_AddBoolToObject(status, "time_synced", s_time_synced);
+    cJSON_AddStringToObject(status, "timezone", HUB_TIMEZONE);
+    if (s_time_synced) {
+        time_t now = time(NULL);
+        struct tm local_time;
+        char formatted[24] = {0};
+        if (localtime_r(&now, &local_time) != NULL &&
+            strftime(formatted, sizeof(formatted), "%Y-%m-%dT%H:%M:%S",
+                     &local_time) > 0) {
+            cJSON_AddStringToObject(status, "local_time", formatted);
+        }
+    }
     zigbee_device_registry_t *light = find_zigbee_device("luz_sala");
     cJSON_AddBoolToObject(status, "device_discovered",
                           light != NULL && light->discovered);
@@ -2084,6 +2468,18 @@ static esp_err_t api_config_get_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(config, "ap_enabled",
                           mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA);
     cJSON_AddBoolToObject(config, "restart_required", false);
+    cJSON_AddBoolToObject(config, "time_synced", s_time_synced);
+    cJSON_AddStringToObject(config, "timezone", HUB_TIMEZONE);
+    if (s_time_synced) {
+        time_t now = time(NULL);
+        struct tm local_time;
+        char formatted[24] = {0};
+        if (localtime_r(&now, &local_time) != NULL &&
+            strftime(formatted, sizeof(formatted), "%Y-%m-%dT%H:%M:%S",
+                     &local_time) > 0) {
+            cJSON_AddStringToObject(config, "local_time", formatted);
+        }
+    }
 
     char *response = cJSON_PrintUnformatted(config);
     cJSON_Delete(config);
@@ -2204,6 +2600,11 @@ void app_main(void)
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ret = ble_provisioning_start(ble_wifi_save_callback);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG_HTTP, "Provisionamento BLE indisponivel; continuando sem BLE: %s",
+                 esp_err_to_name(ret));
+    }
 
     // Initialize event group
     s_wifi_event_group = xEventGroupCreate();
@@ -2250,22 +2651,14 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 
     // Wait for connection
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE,
-                                           pdFALSE,
-                                           portMAX_DELAY);
-
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG_STA, "connected to configured STA SSID:%s", s_sta_ssid);
-    } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGI(TAG_STA, "Failed to connect to configured SSID:%s", s_sta_ssid);
-    } else {
-        ESP_LOGE(TAG_STA, "UNEXPECTED EVENT");
+    if (s_wifi_configured) {
+        esp_wifi_connect();
     }
 
     // Set default netif
-    esp_netif_set_default_netif(esp_netif_sta);
+    if (esp_netif_sta != NULL) {
+        esp_netif_set_default_netif(esp_netif_sta);
+    }
 
     // Initialize UART
     const uart_config_t uart_config = {
@@ -2291,7 +2684,7 @@ void app_main(void)
     // Start HTTP server
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 15;
+    config.max_uri_handlers = 32;
     config.uri_match_fn = httpd_uri_match_wildcard;
 
     httpd_handle_t server = NULL;
@@ -2343,6 +2736,13 @@ void app_main(void)
         .uri = "/api/config/wifi",
         .method = HTTP_POST,
         .handler = api_wifi_config_post_handler,
+        .user_ctx = NULL
+    };
+
+    httpd_uri_t uri_ble_provisioning_post = {
+        .uri = "/api/provisioning/ble",
+        .method = HTTP_POST,
+        .handler = api_ble_provisioning_post_handler,
         .user_ctx = NULL
     };
 
@@ -2409,22 +2809,31 @@ void app_main(void)
         .user_ctx = NULL
     };
 
-    httpd_register_uri_handler(server, &uri_root_get);
-    httpd_register_uri_handler(server, &uri_devices_get);
-    httpd_register_uri_handler(server, &uri_device_command_post);
-    httpd_register_uri_handler(server, &uri_permit_join_post);
-    httpd_register_uri_handler(server, &uri_device_delete);
-    httpd_register_uri_handler(server, &uri_auth_config_post);
-    httpd_register_uri_handler(server, &uri_wifi_config_post);
-    httpd_register_uri_handler(server, &uri_config_get);
-    httpd_register_uri_handler(server, &uri_rules_get);
-    httpd_register_uri_handler(server, &uri_rules_post);
-    httpd_register_uri_handler(server, &uri_rule_put);
-    httpd_register_uri_handler(server, &uri_rule_delete);
-    httpd_register_uri_handler(server, &uri_test_event_post);
-    httpd_register_uri_handler(server, &uri_wifi_event_post);
-    httpd_register_uri_handler(server, &uri_status_get);
-    httpd_register_uri_handler(server, &uri_history_get);
+#define REGISTER_URI(route) do { \
+        esp_err_t route_err = httpd_register_uri_handler(server, &(route)); \
+        if (route_err != ESP_OK) { \
+            ESP_LOGE(TAG_HTTP, "Falha ao registrar rota %s: %s", \
+                     (route).uri, esp_err_to_name(route_err)); \
+        } \
+    } while (0)
+    REGISTER_URI(uri_root_get);
+    REGISTER_URI(uri_devices_get);
+    REGISTER_URI(uri_device_command_post);
+    REGISTER_URI(uri_permit_join_post);
+    REGISTER_URI(uri_device_delete);
+    REGISTER_URI(uri_auth_config_post);
+    REGISTER_URI(uri_wifi_config_post);
+    REGISTER_URI(uri_ble_provisioning_post);
+    REGISTER_URI(uri_config_get);
+    REGISTER_URI(uri_rules_get);
+    REGISTER_URI(uri_rules_post);
+    REGISTER_URI(uri_rule_put);
+    REGISTER_URI(uri_rule_delete);
+    REGISTER_URI(uri_test_event_post);
+    REGISTER_URI(uri_wifi_event_post);
+    REGISTER_URI(uri_status_get);
+    REGISTER_URI(uri_history_get);
+#undef REGISTER_URI
 
     ESP_LOGI(TAG_HTTP, "HTTP server started on port %d", config.server_port);
 }

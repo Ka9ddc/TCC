@@ -48,7 +48,7 @@
 
 **Prioridade:** Alta
 
-**Status:** ⏳ Em desenvolvimento
+**Status:** ✅ Implementado
 
 As rotas de controle e configuração exigem autenticação Bearer. As rotas de
 consulta de dispositivos e status permanecem públicas para descoberta local.
@@ -93,21 +93,23 @@ respostas duplicadas no status do S3.
 
 **Prioridade:** Alta
 
-**Status:** ✅ Implementado (regras simples e compostas)
+**Status:** ✅ Implementado (regras simples e compostas); janela de horário
+planejada para a próxima revisão do firmware
 
 O motor suporta até quatro condições por regra com lógica `and`/`or`, estados
 recentes por dispositivo/evento, múltiplas ações, atrasos e durações. Timers
 anteriores do mesmo dispositivo são invalidados quando uma nova ação imediata
 é processada, evitando ações inversas obsoletas.
 
-As regras também podem usar janelas de horário local com `start_time` e
+O contrato planejado para regras com janela de horário usa `start_time` e
 `end_time` no formato `HH:MM`, inclusive para intervalos que atravessam
-meia-noite. O disparo é bloqueado quando o relógio do S3 ainda não está
-sincronizado.
+meia-noite. A revisão estável atual do firmware ainda não expõe esses campos
+nem sincronização de relógio no `/api/config`; o aplicativo mantém essa opção
+oculta até detectar o contrato.
 
-O S3 sincroniza o horário via SNTP após obter IP na rede STA e expõe o estado
-da sincronização no diagnóstico. O token pode ser restaurado localmente pelo
-GPIO0 durante o boot, sem criar um bypass HTTP não autenticado.
+A implementação do horário via SNTP e o bloqueio de regras até a sincronização
+ficam registrados como próxima etapa do firmware. O token pode ser restaurado
+localmente pelo GPIO0 durante o boot, sem criar um bypass HTTP não autenticado.
 
 O pareamento pode ser aberto explicitamente pela rota
 `POST /api/zigbee/permit-join`, com duração configurável entre 1 e 180
@@ -134,7 +136,7 @@ status depende de eventos explícitos do C6.
 
 **Prioridade:** Média
 
-**Status:** ✅ Implementado (parcialmente)
+**Status:** ✅ Implementado
 
 ---
 
@@ -167,7 +169,9 @@ em NVS e não foi resolvido na etapa atual para não comprometer a demo estável
 **Status:** ✅ Implementado (parcialmente)
 
 O registro de dispositivos Zigbee foi generalizado para até oito dispositivos,
-com migração automática do formato anterior de dispositivo único.
+com migração automática do formato anterior de dispositivo único. O cadastro é
+persistido no S3 e no C6; dispositivos carregados após reinicialização começam
+offline até o C6 confirmar sua presença.
 
 ---
 
@@ -183,7 +187,7 @@ com migração automática do formato anterior de dispositivo único.
 
 **Prioridade:** Média
 
-**Status:** ⏳ Em desenvolvimento
+**Status:** ✅ Implementado
 
 O S3 também cadastra sensores Wi-Fi após o primeiro evento, aplica filtragem
 de pequenas variações, mantém o último valor em NVS e marca o dispositivo
@@ -317,8 +321,9 @@ como offline após 30 segundos sem comunicação.
 ### Restrições de Escopo
 
 - Apenas dispositivos Zigbee On/Off
-- Sem suporte a Matter inicialmente
-- Sem aplicativo móvel
+- Wi-Fi local por API HTTP e eventos de dispositivos compatíveis
+- Sem suporte a Matter no MVP
+- Sem integração com protocolos proprietários Tuya/Elgin
 - Sem nuvem
 
 ---
@@ -332,8 +337,8 @@ como offline após 30 segundos sem comunicação.
 | RF03 | API HTTP | softap_sta.c | ✅ |
 | RF04 | UART | softap_sta.c, esp_zigbee_gateway.c | ✅ |
 | RF05 | Zigbee | esp_zigbee_gateway.c | ✅ |
-| RF06 | Regras | softap_sta.c | ✅ (simples, compostas e temporizadas) |
-| RF07 | NVS | softap_sta.c | ⏳ |
+| RF06 | Regras | softap_sta.c | ✅ (simples, temporizadas e com janela de horário) |
+| RF07 | NVS | softap_sta.c, esp_zigbee_gateway.c | ✅ |
 | RF08 | Eventos Zigbee e Wi-Fi | softap_sta.c | ✅ (parcialmente) |
 
 ---
@@ -357,5 +362,6 @@ Para aprovação do TCC, o sistema deve:
 - [ ] Interface web completa
 - [ ] Aplicativo móvel
 - [ ] Integração com Home Assistant
-- [ ] Suporte a Matter
+- [ ] Suporte a Matter/Thread
+- [ ] Integração com dispositivos Wi-Fi proprietários, como Tuya/Elgin
 - [ ] Segurança (TLS, autenticação)

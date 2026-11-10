@@ -98,6 +98,23 @@ Resposta:
 
 A resposta não inclui senhas, token ou outros segredos.
 
+O endpoint `GET /api/status` também expõe as métricas de latência dos comandos
+que receberam resposta do C6:
+
+```json
+{
+  "command_latency_samples": 12,
+  "command_latency_last_ms": 184,
+  "command_latency_min_ms": 142,
+  "command_latency_max_ms": 311,
+  "command_latency_avg_ms": 201.5
+}
+```
+
+O tempo é medido no S3 desde o envio do comando pela UART até a resposta
+correspondente do C6. Timeouts continuam contabilizados separadamente em
+`command_timeouts`.
+
 Para trocar o token, envie o novo valor autenticado:
 
 ```http
@@ -422,31 +439,20 @@ o histórico e a criação de timers de duração são executados pela tarefa do
 motor de automação, evitando sobrecarregar a tarefa interna `Tmr Svc` do
 FreeRTOS.
 
-Uma nova ação imediata para um dispositivo invalida timers anteriores desse
-mesmo dispositivo. Isso evita que uma ação inversa antiga desligue o dispositivo
-depois de uma nova ativação (por exemplo, duas ativações consecutivas com
-`duration_seconds`). O S3 mantém uma quantidade limitada de timers ativos e
-descarta com erro explícito novas temporizações quando esse limite é atingido.
+Cada atraso ou duração cria um timer independente. A fila e a tarefa de
+automação mantêm o envio UART fora do callback do timer. O cancelamento e a
+deduplicação de timers ainda não fazem parte do contrato estável.
 
-Regras também podem combinar até quatro condições usando `and` ou `or`:
+Condições compostas usando `and` ou `or` foram avaliadas em uma revisão
+experimental, mas não fazem parte do firmware estável atual nem do aplicativo.
+O contrato entregue mantém uma condição por regra:
 
 ```json
 {
-  "logic": "and",
-  "conditions": [
-    {
-      "device": "sensor_luminosidade",
-      "event": "illuminance_changed",
-      "value": 100,
-      "operator": "less_than"
-    },
-    {
-      "device": "sensor_presenca",
-      "event": "occupancy_changed",
-      "value": true,
-      "operator": "equals"
-    }
-  ],
+  "trigger_device": "sensor_luminosidade",
+  "trigger_event": "illuminance_changed",
+  "trigger_value": 100,
+  "operator": "less_than",
   "actions": [
     {
       "device": "luz_sala",
@@ -456,11 +462,10 @@ Regras também podem combinar até quatro condições usando `and` ou `or`:
 }
 ```
 
-O S3 mantém o último valor recebido para cada par dispositivo/evento e avalia
-as condições compostas com esses estados. A regra dispara somente quando o
-resultado lógico passa de falso para verdadeiro; quando volta a falso, fica
-armada para uma nova execução. O formato legado com uma única condição continua
-aceito.
+O S3 dispara somente quando a condição passa de falso para verdadeiro; quando
+volta a falso, a regra fica armada para uma nova execução. O formato legado com
+`action_device` e `action` continua aceito. Condições compostas ficam como
+trabalho futuro, depois que o app tiver um editor e testes para esse contrato.
 
 Uma regra pode restringir a execução a uma janela de horário local usando
 `start_time` e `end_time` no formato `HH:MM`:
@@ -484,9 +489,9 @@ Uma regra pode restringir a execução a uma janela de horário local usando
 
 Os limites são inclusivos. Se `start_time` for posterior a `end_time`, a
 janela atravessa a meia-noite; por exemplo, `22:00`–`06:00`. A avaliação usa o
-relógio local do S3. Até que o relógio seja sincronizado ou configurado, regras
-com janela permanecem bloqueadas; a sincronização de horário (SNTP/RTC) é uma
-evolução futura.
+relógio local do S3. Até que o relógio seja sincronizado, regras com janela
+permanecem bloqueadas. O estado da sincronização é exposto em `/api/status` e
+`/api/config`.
 
 ### 2.6 Correlação de comandos
 
@@ -811,13 +816,16 @@ Conecta à rede Wi-Fi doméstica.
 
 #### 5.3 Sincronização de horário
 
-Quando o STA obtém um endereço IP, o S3 inicia sincronização SNTP com
-`pool.ntp.org`. O timezone padrão é `BRT3` (UTC-3), correspondente ao horário
-local do projeto. O endpoint autenticado `GET /api/config` informa
-`time_synced`, `timezone` e `local_time` quando o relógio já foi sincronizado.
+O contrato planejado para essa etapa usa `start_time` e `end_time` no formato
+`HH:MM`, inclusive para intervalos que atravessam meia-noite. A revisão estável
+atual do firmware ainda não expõe esses campos nem `time_synced`, `timezone` e
+`local_time` no endpoint autenticado `GET /api/config`. O aplicativo mantém o
+editor oculto até detectar explicitamente esses campos, evitando enviar uma
+configuração que seria ignorada.
 
-Regras com janela de horário permanecem bloqueadas até a sincronização do
-relógio. A sincronização depende de conectividade do STA; o AP local continua
+Quando a etapa for retomada, o S3 deverá sincronizar o horário via SNTP após
+obter IP na rede STA e bloquear regras com janela até a sincronização. A
+sincronização dependerá de conectividade do STA; o AP local continuará
 
 ### Dívida técnica: stack overflow em reboot com histórico em NVS
 
@@ -848,6 +856,13 @@ Armazenamento persistente de configurações.
 - Dispositivos cadastrados
 - Regras de automação
 - Estado do sistema
+
+O registro de dispositivos Zigbee é persistido nos dois controladores. O S3
+guarda o cadastro exposto pela API, incluindo ID, endereço curto, endpoint,
+IEEE e último estado conhecido. O C6 guarda a tabela necessária para
+reconhecer os dispositivos após reinicialização e atualiza os endereços quando
+eles anunciam novamente na rede Zigbee. Um dispositivo carregado do NVS começa
+como offline até que o C6 confirme sua presença.
 
 ### Recuperação do token
 
@@ -907,3 +922,20 @@ ESP_ERROR_CHECK(nvs_commit(nvs_handle));
 2. Adicionar checksum nas mensagens UART
 3. Habilitar segurança Zigbee
 4. Usar WPA3 no Wi-Fi AP
+
+## Provisionamento BLE e acesso HTTP
+
+O provisionamento inicial usa BLE apenas para transportar as credenciais da rede
+doméstica. Depois que o S3 obtém um endereço IP, ele envia esse endereço no
+estado `WIFI_CONNECTED`.
+
+O aplicativo valida `GET /api/status` antes de salvar a conexão. Como o
+firmware opera em AP+STA, o aplicativo tenta primeiro o IP informado pelo STA
+e, se necessário, o endereço do AP local `192.168.4.1`. Se nenhum dos dois
+responder, o aplicativo mantém a tela de provisionamento e orienta o usuário a
+conectar o celular à mesma rede do hub.
+
+Como a API local usa HTTP durante o protótipo, a build Android habilita
+explicitamente tráfego cleartext para endereços locais. Essa configuração é
+necessária para que o aplicativo consiga acessar `http://192.168.x.x`; ela não
+substitui HTTPS para uma versão distribuível fora da rede local.
